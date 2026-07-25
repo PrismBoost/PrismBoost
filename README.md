@@ -17,6 +17,64 @@ clf.fit(X_train, y_train)
 print(clf.score(X_test, y_test))
 ```
 
+## Why oblique boosting?
+
+Axis-aligned GBDTs approximate curved boundaries with staircases. PrismBoost fits **linear (oblique) splits**, so decision surfaces on non-linear problems are typically smoother.
+
+<p align="center">
+  <img src="docs/images/moons_surface.jpg" alt="PrismBoost vs XGBoost probability surfaces on moons" width="720"/>
+</p>
+
+<p align="center"><em>Predicted-probability surfaces on moons: PrismBoost (left) vs XGBoost (right).</em></p>
+
+<p align="center">
+  <img src="docs/images/decision_boundaries_grid.jpg" alt="Decision boundaries on six synthetic 2D datasets" width="720"/>
+</p>
+
+<p align="center"><em>Decision boundaries on six synthetic 2D datasets (rows) across classifiers (columns). Lower surface roughness <code>S</code> is smoother.</em></p>
+
+<p align="center">
+  <img src="docs/images/smoothness_bar.png" alt="Mean surface roughness by classifier" width="560"/>
+</p>
+
+## Benchmark highlights (PMLB)
+
+Evaluated on **121** Penn Machine Learning Benchmark classification datasets against strong baselines (CatBoost, LightGBM, LightGBM-linear, XGBoost, SPORF, Random Forest, Logistic Regression). Hyperparameters are tuned with Optuna; scores are repeated stratified CV.
+
+**Median scores** (higher is better for F1 / ROC-AUC; lower is better for inference latency):
+
+| Model | Median macro-F1 | Median ROC-AUC | Median inference (ms/row) |
+|-------|----------------:|---------------:|-------------------------:|
+| **PrismBoost** | **0.903** | 0.976 | **0.056** |
+| CatBoost | 0.892 | **0.976** | 0.184 |
+| XGBoost | 0.875 | 0.970 | 0.615 |
+| LightGBM-linear | 0.875 | 0.970 | 0.567 |
+| LightGBM | 0.870 | 0.972 | 0.550 |
+| Random Forest | 0.862 | 0.964 | 5.140 |
+| SPORF | 0.856 | 0.970 | 10.058 |
+| Logistic Regression | 0.822 | 0.942 | 0.053 |
+
+**Average ranks** (1 = best; Friedman tests significant for macro-F1 and ROC-AUC):
+
+| Model | Macro-F1 rank | ROC-AUC rank |
+|-------|--------------:|-------------:|
+| CatBoost | **3.33** | **3.48** |
+| **PrismBoost** | **3.88** | 4.26 |
+| LightGBM-linear | 3.99 | 4.26 |
+| LightGBM | 4.10 | 4.10 |
+| XGBoost | 4.31 | 4.24 |
+| Logistic Regression | 5.31 | 5.66 |
+| Random Forest | 5.48 | 5.31 |
+| SPORF | 5.61 | 4.70 |
+
+<p align="center">
+  <img src="docs/images/cd_diagram.png" alt="Nemenyi critical-difference diagrams" width="720"/>
+</p>
+
+<p align="center"><em>Nemenyi critical-difference diagrams (α = 0.05). Models connected by a bar are not significantly different.</em></p>
+
+On these data, PrismBoost is competitive with modern GBDTs on accuracy while remaining among the **fastest at inference** (second only to logistic regression; fastest non-linear model by median latency).
+
 ## Install
 
 Requires Python 3.10–3.13, a C++17 compiler, and CMake (for the optional native extension).

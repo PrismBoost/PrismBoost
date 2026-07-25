@@ -47,9 +47,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/LinearBoost/prismboost"
-Repository = "https://github.com/LinearBoost/prismboost"
-Issues = "https://github.com/LinearBoost/prismboost/issues"
+Homepage = "https://github.com/LinearBoost/PrismBoost"
+Repository = "https://github.com/LinearBoost/PrismBoost"
+Issues = "https://github.com/LinearBoost/PrismBoost/issues"
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"
