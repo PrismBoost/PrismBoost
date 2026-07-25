@@ -11,6 +11,8 @@ authors = [
 ]
 description = "PrismBoost: gradient boosting with SEFR oblique splits for classification and regression."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 keywords = [
     "classification",
     "regression",

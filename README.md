@@ -118,6 +118,8 @@ pytest -q
 
 MIT — see [LICENSE](LICENSE).
 
+Third-party note: `prismboost._utils` includes code derived from [wnb](https://github.com/msamogh/wnb) under BSD-3-Clause (`src/prismboost/licenses/BSD-3-Clause.txt`).
+
 ## Citation
 
 If you use PrismBoost in academic work, please cite the accompanying paper (to be updated on publication).
