@@ -116,9 +116,9 @@ pytest -q
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+This project is licensed under the [MIT License](https://github.com/PrismBoost/PrismBoost/blob/main/LICENSE).
 
-Third-party note: `prismboost._utils` includes code derived from [wnb](https://github.com/msamogh/wnb) under BSD-3-Clause (`src/prismboost/licenses/BSD-3-Clause.txt`).
+Third-party note: `prismboost._utils` includes code derived from [wnb](https://github.com/msamogh/wnb) under the [BSD 3-Clause License](https://github.com/PrismBoost/PrismBoost/blob/main/src/prismboost/licenses/BSD-3-Clause.txt).
 
 ## Citation
 
