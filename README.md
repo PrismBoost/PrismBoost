@@ -102,10 +102,20 @@ If the C++ extension fails to build, the package still works via the pure-Python
 - Binary and multiclass classification; regression
 - Optional C++ backend for faster fit/predict
 - sklearn estimator API (`fit`, `predict`, `predict_proba`, pipelines, pickling)
+- Works with Optuna / GridSearchCV / RandomizedSearchCV
 
-## Quick example
+## Examples
 
-See [`examples/quickstart.py`](examples/quickstart.py).
+```bash
+pip install "prismboost[examples]"   # adds Optuna
+python examples/quickstart.py
+python examples/optuna_tuning.py --n-trials 20
+```
+
+- [`examples/quickstart.py`](examples/quickstart.py) — minimal fit / score
+- [`examples/optuna_tuning.py`](examples/optuna_tuning.py) — Optuna CV search over trees, depth, learning rate, `split_mode`, and scaler
+
+Docs mirror: [`docs/optuna_tuning.rst`](docs/optuna_tuning.rst).
 
 ## Tests
 
