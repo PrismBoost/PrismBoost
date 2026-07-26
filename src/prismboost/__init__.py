@@ -1,6 +1,6 @@
 """PrismBoost: gradient boosting with SEFR oblique splits."""
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 from .sefr import SEFR
 from .sefr_gbdt import (
