@@ -1,5 +1,9 @@
 # PrismBoost
 
+[![PyPI](https://img.shields.io/pypi/v/prismboost.svg)](https://pypi.org/project/prismboost/)
+[![Python](https://img.shields.io/pypi/pyversions/prismboost.svg)](https://pypi.org/project/prismboost/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/PrismBoost/PrismBoost/blob/main/LICENSE)
+
 **PrismBoost** is a gradient-boosting classifier/regressor that uses **SEFR oblique splits** at internal nodes (hyperplane splits instead of axis-aligned thresholds), with an optional fast C++ backend.
 
 ```python
@@ -77,15 +81,26 @@ On these data, PrismBoost is competitive with modern GBDTs on accuracy while rem
 
 ## Install
 
-Requires Python 3.10–3.13, a C++17 compiler, and CMake (for the optional native extension).
+```bash
+pip install prismboost
+```
+
+Requires Python 3.10–3.13. A C++17 compiler and CMake are used when building the optional native extension (included for common platforms via wheels / sdist build).
+
+From source (editable / development):
 
 ```bash
-pip install .
-# or editable:
 pip install -e ".[dev]"
 ```
 
 If the C++ extension fails to build, the package still works via the pure-Python backend.
+
+Extras:
+
+```bash
+pip install "prismboost[examples]"   # Optuna for the tuning example
+pip install "prismboost[dev]"        # pytest, ruff
+```
 
 ## Public API
 
@@ -107,7 +122,7 @@ If the C++ extension fails to build, the package still works via the pure-Python
 ## Examples
 
 ```bash
-pip install "prismboost[examples]"   # adds Optuna
+pip install "prismboost[examples]"
 python examples/quickstart.py
 python examples/optuna_tuning.py --n-trials 20
 ```
