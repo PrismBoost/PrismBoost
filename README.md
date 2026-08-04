@@ -16,10 +16,35 @@ X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=0, stratify=y
 )
 
-clf = PrismBoostClassifier(n_estimators=100, max_depth=3, random_state=0)
+clf = PrismBoostClassifier(random_state=0)   # capacity parameters adapt to the data
 clf.fit(X_train, y_train)
 print(clf.score(X_test, y_test))
+print(clf.auto_config_)                      # what was chosen for this training set
 ```
+
+## Adaptive defaults
+
+Every capacity parameter defaults to `"auto"` and is resolved from the training-set shape at `fit` time, the way CatBoost adapts its learning rate to dataset size. The rules were calibrated on the per-dataset Optuna optima of the 121 PMLB benchmark datasets, so an untuned model starts near a sensible configuration instead of one fixed point that under-fits large data and over-fits small data.
+
+| Parameter | `"auto"` rule |
+|-----------|---------------|
+| `n_estimators` | 200 |
+| `learning_rate` | 0.05 below 500 rows, else 0.1 (keeps `learning_rate * n_estimators` near the tuned optimum) |
+| `max_depth` | 4 below 500 rows, else 6 |
+| `min_samples_leaf` | `sqrt(n_samples) / 2`, clipped to `[5, 30]` |
+| `min_samples_split` | `2 * min_samples_leaf` |
+| `subsample` | 0.8, or 1.0 below 100 rows |
+| `split_mode` | `hybrid` up to 50 features, else `hybrid_sampled` |
+
+Only the shape of `X` is used, never `y`, so folds of equal size resolve identically and no label information leaks. Passing an explicit value disables adaptation for that parameter alone:
+
+```python
+clf = PrismBoostClassifier(max_depth=3, random_state=0)  # depth fixed, the rest still auto
+clf.fit(X_train, y_train)
+clf.max_depth_, clf.n_estimators_   # (3, 200)
+```
+
+Class imbalance is deliberately left alone (`class_weight=None`), matching XGBoost and CatBoost defaults. To reproduce pre-0.2 behaviour, pass the old values explicitly: `n_estimators=100, learning_rate=0.1, max_depth=3, min_samples_leaf=10, min_samples_split=2, subsample=1.0, split_mode="hybrid_sampled"`.
 
 ## Why oblique boosting?
 
@@ -110,6 +135,7 @@ pip install "prismboost[dev]"        # pytest, ruff
 | `PrismBoostRegressor` | Primary regressor |
 | `SEFRBoostClassifier` / `SEFRBoostRegressor` | Compatibility aliases |
 | `SEFR` | Linear weak learner used inside oblique splits |
+| `auto_boosting_config(n_samples, n_features)` | The `"auto"` default rules, callable for inspection |
 
 ## Features
 

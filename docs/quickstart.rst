@@ -35,12 +35,7 @@ Minimal training example
 
    model = Pipeline([
        ("scale", StandardScaler()),
-       ("clf", PrismBoostClassifier(
-           n_estimators=100,
-           learning_rate=0.1,
-           max_depth=3,
-           random_state=42,
-       )),
+       ("clf", PrismBoostClassifier(random_state=42)),
    ])
 
    model.fit(X_train, y_train)
@@ -49,4 +44,9 @@ Minimal training example
 
    print("F1(weighted):", f1_score(y_test, y_pred, average="weighted"))
    print("ROC-AUC:", roc_auc_score(y_test, y_prob))
+
+Capacity parameters (``n_estimators``, ``learning_rate``, ``max_depth``,
+``min_samples_leaf``, ``min_samples_split``, ``subsample``, ``split_mode``)
+default to ``"auto"`` and are derived from the training-set shape; see
+:doc:`adaptive_defaults`. Pass any of them explicitly to pin it.
 

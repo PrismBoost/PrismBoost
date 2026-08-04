@@ -9,4 +9,5 @@ This tutorial introduces ``PrismBoostClassifier`` (implemented in
 
    overview
    quickstart
+   adaptive_defaults
    optuna_tuning

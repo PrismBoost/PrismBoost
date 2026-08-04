@@ -33,9 +33,105 @@ __all__ = [
     "PrismBoostClassifier",
     "PrismBoostRegressor",
     "SPLIT_MODE_OPTIONS",
+    "AUTO_PARAM_NAMES",
+    "auto_boosting_config",
 ]
 
 SPLIT_MODE_OPTIONS = ("sefr_only", "axis_fallback", "hybrid_sampled", "hybrid")
+
+#: Parameters that accept ``"auto"`` and are then derived from the training data.
+AUTO_PARAM_NAMES = (
+    "n_estimators",
+    "learning_rate",
+    "max_depth",
+    "min_samples_leaf",
+    "min_samples_split",
+    "subsample",
+    "split_mode",
+)
+
+
+def auto_boosting_config(n_samples: int, n_features: int) -> dict:
+    """Derive boosting hyperparameters from the training set shape.
+
+    Used for every parameter left at ``"auto"``. The rules were calibrated
+    against the per-dataset Optuna optima of 121 PMLB classification datasets:
+    they target the median tuned setting per sample-size regime, so an untuned
+    model starts near a reasonable configuration instead of a fixed one that
+    under-fits large data and over-fits small data.
+
+    Only the shape of ``X`` is used (never ``y``), so the result is identical
+    across cross-validation folds of the same size and leaks no label
+    information.
+
+    Parameters
+    ----------
+    n_samples : int
+        Number of training rows.
+
+    n_features : int
+        Number of training columns.
+
+    Returns
+    -------
+    config : dict
+        Values for every name in :data:`AUTO_PARAM_NAMES`.
+    """
+    n = max(1, int(n_samples))
+    p = max(1, int(n_features))
+
+    # Tuned optima keep the shrinkage budget (learning_rate * n_estimators)
+    # near 10 on small data and near 20 from ~500 rows upward.
+    small = n < 500
+    learning_rate = 0.05 if small else 0.1
+    min_samples_leaf = int(min(30, max(5, round(np.sqrt(n) / 2.0))))
+
+    return {
+        "n_estimators": 200,
+        "learning_rate": learning_rate,
+        "max_depth": 4 if small else 6,
+        "min_samples_leaf": min_samples_leaf,
+        "min_samples_split": max(2, 2 * min_samples_leaf),
+        "subsample": 1.0 if n < 100 else 0.8,
+        # Scanning every axis-aligned candidate costs O(n_features) per node;
+        # sample them once the frame is wide.
+        "split_mode": "hybrid" if p <= 50 else "hybrid_sampled",
+    }
+
+
+def _is_auto(value) -> bool:
+    return isinstance(value, str) and value == "auto"
+
+
+def _resolve_boosting_params(estimator, n_samples: int, n_features: int, names) -> dict:
+    """Resolve ``"auto"`` parameters and record them as fitted attributes."""
+    auto = auto_boosting_config(n_samples, n_features)
+    resolved = {}
+    auto_used = {}
+    for name in names:
+        value = getattr(estimator, name)
+        if _is_auto(value):
+            value = auto[name]
+            auto_used[name] = value
+        resolved[name] = value
+        setattr(estimator, f"{name}_", value)
+    estimator.auto_config_ = auto_used
+    return resolved
+
+
+def _backfill_resolved_params(estimator) -> None:
+    """Populate ``*_`` attributes for estimators pickled before auto defaults existed."""
+    if hasattr(estimator, "n_estimators_"):
+        return
+    values = {}
+    for name in AUTO_PARAM_NAMES:
+        value = getattr(estimator, name, None)
+        if value is None or _is_auto(value):
+            return
+        values[f"{name}_"] = value
+    for attr, value in values.items():
+        setattr(estimator, attr, value)
+    estimator.auto_config_ = {}
 
 
 def _cpp_random_seed(random_state) -> int:
@@ -567,27 +663,38 @@ class SEFRGradientBoostingClassifier(ClassifierMixin, BaseEstimator):
     multiplies weights for the positive class ``classes_[1]``; for multiclass it has
     no meaning and is ignored. SEFR node fitting uses sample weights ``|r| * ew``.
 
+    Every capacity parameter below defaults to ``"auto"``: the value is derived
+    from the training set shape in :meth:`fit` by :func:`auto_boosting_config`,
+    the way CatBoost adapts its learning rate to the dataset. Passing an
+    explicit value disables adaptation for that parameter only. Resolved values
+    are exposed as ``n_estimators_``, ``learning_rate_``, ... and the subset that
+    was derived is listed in ``auto_config_``.
+
     Parameters
     ----------
-    n_estimators : int, default=100
-        Number of boosting iterations (trees).
+    n_estimators : int or "auto", default="auto"
+        Number of boosting iterations (trees). ``"auto"`` uses 200.
 
-    learning_rate : float, default=0.1
-        Shrinkage applied to each tree's prediction.
+    learning_rate : float or "auto", default="auto"
+        Shrinkage applied to each tree's prediction. ``"auto"`` uses 0.05 below
+        500 rows and 0.1 above, keeping ``learning_rate * n_estimators`` near
+        the tuned optimum for that size.
 
-    max_depth : int, default=3
-        Maximum depth of each tree (root depth is 0).
+    max_depth : int or "auto", default="auto"
+        Maximum depth of each tree (root depth is 0). ``"auto"`` uses 4 below
+        500 rows and 6 above.
 
-    min_samples_leaf : int, default=10
-        Minimum samples per child when splitting (by row count at node). Values
-        like 20 are conservative for small training sets (e.g. n≈500); 5–10 is
-        often better when folds leave few rows.
+    min_samples_leaf : int or "auto", default="auto"
+        Minimum samples per child when splitting (by row count at node).
+        ``"auto"`` uses ``sqrt(n_samples) / 2`` clipped to ``[5, 30]``.
 
-    min_samples_split : int, default=2
-        Minimum samples required to attempt a split at a node.
+    min_samples_split : int or "auto", default="auto"
+        Minimum samples required to attempt a split at a node. ``"auto"`` uses
+        twice the resolved ``min_samples_leaf``.
 
-    subsample : float, default=1.0
+    subsample : float or "auto", default="auto"
         Fraction of rows used to fit each tree (stochastic boosting).
+        ``"auto"`` uses 0.8, or 1.0 below 100 rows.
 
     class_weight : dict, 'balanced', or None, default=None
         Multipliers per class (sklearn-style), combined with ``sample_weight``.
@@ -597,10 +704,12 @@ class SEFRGradientBoostingClassifier(ClassifierMixin, BaseEstimator):
         ``classes_[1]`` (similar to XGBoost). ``None`` means ``1.0``. Ignored for
         multiclass targets.
 
-    split_mode : {'sefr_only', 'axis_fallback', 'hybrid_sampled', 'hybrid'}, \
-default='hybrid_sampled'
+    split_mode : {'auto', 'sefr_only', 'axis_fallback', 'hybrid_sampled', \
+'hybrid'}, default='auto'
         How each internal node chooses between SEFR oblique splits and
         axis-aligned single-feature splits (see :class:`SEFRBoostClassifier`).
+        ``"auto"`` uses ``'hybrid'`` up to 50 features and ``'hybrid_sampled'``
+        beyond that, where scanning every axis-aligned candidate gets expensive.
 
     random_state : int, RandomState instance or None, default=None
         Random seed for subsampling and ``hybrid_sampled`` feature sampling.
@@ -609,6 +718,16 @@ default='hybrid_sampled'
         When ``True`` (default if the compiled ``_sefr_boost_core`` extension is
         installed), training and prediction run in the C++ backend for much faster
         fit/predict. Set ``False`` to force the pure-Python implementation.
+
+    Attributes
+    ----------
+    auto_config_ : dict
+        Parameters that were resolved from the data shape at ``fit`` time, mapped
+        to the value used. Empty when every parameter was given explicitly.
+
+    n_estimators_, learning_rate_, max_depth_, min_samples_leaf_, \
+min_samples_split_, subsample_, split_mode_
+        Values actually used for training, whether explicit or auto-derived.
 
     Notes
     -----
@@ -623,15 +742,15 @@ default='hybrid_sampled'
     """
 
     _parameter_constraints: dict = {
-        "n_estimators": [Interval(Integral, 1, None, closed="left")],
-        "learning_rate": [Interval(Real, 0.0, None, closed="left")],
-        "max_depth": [Interval(Integral, 1, None, closed="left")],
-        "min_samples_leaf": [Interval(Integral, 1, None, closed="left")],
-        "min_samples_split": [Interval(Integral, 2, None, closed="left")],
-        "subsample": [Interval(Real, 0.0, 1.0, closed="right")],
+        "n_estimators": [Interval(Integral, 1, None, closed="left"), StrOptions({"auto"})],
+        "learning_rate": [Interval(Real, 0.0, None, closed="left"), StrOptions({"auto"})],
+        "max_depth": [Interval(Integral, 1, None, closed="left"), StrOptions({"auto"})],
+        "min_samples_leaf": [Interval(Integral, 1, None, closed="left"), StrOptions({"auto"})],
+        "min_samples_split": [Interval(Integral, 2, None, closed="left"), StrOptions({"auto"})],
+        "subsample": [Interval(Real, 0.0, 1.0, closed="right"), StrOptions({"auto"})],
         "class_weight": [StrOptions({"balanced"}), dict, None],
         "scale_pos_weight": [Interval(Real, 0.0, None, closed="neither"), None],
-        "split_mode": [StrOptions(set(SPLIT_MODE_OPTIONS))],
+        "split_mode": [StrOptions(set(SPLIT_MODE_OPTIONS) | {"auto"})],
         "random_state": ["random_state"],
         "use_cpp": ["boolean", None],
     }
@@ -639,15 +758,15 @@ default='hybrid_sampled'
     def __init__(
         self,
         *,
-        n_estimators: int = 100,
-        learning_rate: float = 0.1,
-        max_depth: int = 3,
-        min_samples_leaf: int = 10,
-        min_samples_split: int = 2,
-        subsample: float = 1.0,
+        n_estimators="auto",
+        learning_rate="auto",
+        max_depth="auto",
+        min_samples_leaf="auto",
+        min_samples_split="auto",
+        subsample="auto",
         class_weight=None,
         scale_pos_weight=None,
-        split_mode: str = "hybrid_sampled",
+        split_mode: str = "auto",
         random_state=None,
         use_cpp=None,
     ):
@@ -700,6 +819,7 @@ default='hybrid_sampled'
             )
         else:
             self.__dict__.update(state)
+        _backfill_resolved_params(self)
 
     def save(self, path):
         check_is_fitted(self, ["trees_", "_cpp_core_"], all_or_any=any)
@@ -751,6 +871,7 @@ default='hybrid_sampled'
 
         n_samples = X.shape[0]
         y_original = np.asarray(y)
+        _resolve_boosting_params(self, n_samples, self.n_features_in_, AUTO_PARAM_NAMES)
 
         if sample_weight is not None:
             sw = _check_sample_weight(sample_weight, X, dtype=np.float64)
@@ -785,13 +906,13 @@ default='hybrid_sampled'
                 self.init_score_ = np.log(prior)
 
             self._cpp_core_ = SEFRBoostClassifierCore(
-                n_estimators=self.n_estimators,
-                learning_rate=self.learning_rate,
-                max_depth=self.max_depth,
-                min_samples_leaf=self.min_samples_leaf,
-                min_samples_split=self.min_samples_split,
-                subsample=self.subsample,
-                split_mode=self.split_mode,
+                n_estimators=self.n_estimators_,
+                learning_rate=self.learning_rate_,
+                max_depth=self.max_depth_,
+                min_samples_leaf=self.min_samples_leaf_,
+                min_samples_split=self.min_samples_split_,
+                subsample=self.subsample_,
+                split_mode=self.split_mode_,
                 random_state=_cpp_random_seed(self.random_state),
             )
             X_c = np.ascontiguousarray(X, dtype=np.float64)
@@ -832,13 +953,13 @@ default='hybrid_sampled'
 
         self.trees_: list[_SEFRTree] = []
 
-        for _ in range(self.n_estimators):
+        for _ in range(self.n_estimators_):
             p = 1.0 / (1.0 + np.exp(-F))
             p = np.clip(p, 1e-10, 1.0 - 1e-10)
             residuals = y_binary - p
 
-            if self.subsample < 1.0:
-                n_sub = max(1, int(self.subsample * n_samples))
+            if self.subsample_ < 1.0:
+                n_sub = max(1, int(self.subsample_ * n_samples))
                 sub_idx = rng.choice(n_samples, size=n_sub, replace=False)
                 X_b = X[sub_idx]
                 r_b = residuals[sub_idx]
@@ -852,15 +973,15 @@ default='hybrid_sampled'
                 r_b,
                 p_b,
                 w_b,
-                max_depth=self.max_depth,
-                min_samples_leaf=self.min_samples_leaf,
-                min_samples_split=self.min_samples_split,
+                max_depth=self.max_depth_,
+                min_samples_leaf=self.min_samples_leaf_,
+                min_samples_split=self.min_samples_split_,
                 regression=False,
-                split_mode=self.split_mode,
+                split_mode=self.split_mode_,
                 rng=rng,
             )
             self.trees_.append(tree)
-            F = F + self.learning_rate * tree.predict(X)
+            F = F + self.learning_rate_ * tree.predict(X)
 
         self.F_train_ = F
 
@@ -891,15 +1012,15 @@ default='hybrid_sampled'
         # One list of K trees per boosting stage.
         self.trees_: list[list[_SEFRTree]] = []
 
-        for _ in range(self.n_estimators):
+        for _ in range(self.n_estimators_):
             # Softmax with max-subtraction for numerical stability.
             Fmax = F.max(axis=1, keepdims=True)
             expF = np.exp(F - Fmax)
             P = expF / expF.sum(axis=1, keepdims=True)
             P = np.clip(P, 1e-10, 1.0 - 1e-10)
 
-            if self.subsample < 1.0:
-                n_sub = max(1, int(self.subsample * n_samples))
+            if self.subsample_ < 1.0:
+                n_sub = max(1, int(self.subsample_ * n_samples))
                 sub_idx = rng.choice(n_samples, size=n_sub, replace=False)
             else:
                 sub_idx = slice(None)
@@ -912,15 +1033,15 @@ default='hybrid_sampled'
                     residual_k[sub_idx],
                     P[sub_idx, k],
                     ew[sub_idx],
-                    max_depth=self.max_depth,
-                    min_samples_leaf=self.min_samples_leaf,
-                    min_samples_split=self.min_samples_split,
+                    max_depth=self.max_depth_,
+                    min_samples_leaf=self.min_samples_leaf_,
+                    min_samples_split=self.min_samples_split_,
                     regression=False,
-                    split_mode=self.split_mode,
+                    split_mode=self.split_mode_,
                     rng=rng,
                 )
                 stage_trees.append(tree)
-                F[:, k] += self.learning_rate * self.mc_leaf_scale_ * tree.predict(X)
+                F[:, k] += self.learning_rate_ * self.mc_leaf_scale_ * tree.predict(X)
             self.trees_.append(stage_trees)
 
         self.F_train_ = F
@@ -951,7 +1072,7 @@ default='hybrid_sampled'
         if self.n_classes_ == 2:
             F = np.full(X.shape[0], self.init_score_, dtype=np.float64)
             for tree in self.trees_:
-                F = F + self.learning_rate * tree.predict(X)
+                F = F + self.learning_rate_ * tree.predict(X)
             # F is log-odds for classes_[1] vs classes_[0] (y encoded as class index).
             return F
         return self._raw_F(X)
@@ -962,7 +1083,7 @@ default='hybrid_sampled'
         F = np.tile(self.init_score_, (n, 1))
         for stage in self.trees_:
             for k, tree in enumerate(stage):
-                F[:, k] += self.learning_rate * self.mc_leaf_scale_ * tree.predict(X)
+                F[:, k] += self.learning_rate_ * self.mc_leaf_scale_ * tree.predict(X)
         return F
 
     def predict_proba(self, X):
@@ -993,7 +1114,9 @@ class SEFRGradientBoostingRegressor(RegressorMixin, BaseEstimator):
     weighted mean of ``y``.
 
     Parameters are the same as :class:`SEFRGradientBoostingClassifier` except
-    ``class_weight`` and ``scale_pos_weight`` are not used.
+    ``class_weight`` and ``scale_pos_weight`` are not used. Capacity parameters
+    default to ``"auto"`` and are resolved from the training set shape by
+    :func:`auto_boosting_config`; see ``auto_config_`` for what was derived.
 
     Notes
     -----
@@ -1001,13 +1124,13 @@ class SEFRGradientBoostingRegressor(RegressorMixin, BaseEstimator):
     """
 
     _parameter_constraints: dict = {
-        "n_estimators": [Interval(Integral, 1, None, closed="left")],
-        "learning_rate": [Interval(Real, 0.0, None, closed="left")],
-        "max_depth": [Interval(Integral, 1, None, closed="left")],
-        "min_samples_leaf": [Interval(Integral, 1, None, closed="left")],
-        "min_samples_split": [Interval(Integral, 2, None, closed="left")],
-        "subsample": [Interval(Real, 0.0, 1.0, closed="right")],
-        "split_mode": [StrOptions(set(SPLIT_MODE_OPTIONS))],
+        "n_estimators": [Interval(Integral, 1, None, closed="left"), StrOptions({"auto"})],
+        "learning_rate": [Interval(Real, 0.0, None, closed="left"), StrOptions({"auto"})],
+        "max_depth": [Interval(Integral, 1, None, closed="left"), StrOptions({"auto"})],
+        "min_samples_leaf": [Interval(Integral, 1, None, closed="left"), StrOptions({"auto"})],
+        "min_samples_split": [Interval(Integral, 2, None, closed="left"), StrOptions({"auto"})],
+        "subsample": [Interval(Real, 0.0, 1.0, closed="right"), StrOptions({"auto"})],
+        "split_mode": [StrOptions(set(SPLIT_MODE_OPTIONS) | {"auto"})],
         "random_state": ["random_state"],
         "use_cpp": ["boolean", None],
     }
@@ -1015,13 +1138,13 @@ class SEFRGradientBoostingRegressor(RegressorMixin, BaseEstimator):
     def __init__(
         self,
         *,
-        n_estimators: int = 100,
-        learning_rate: float = 0.1,
-        max_depth: int = 3,
-        min_samples_leaf: int = 10,
-        min_samples_split: int = 2,
-        subsample: float = 1.0,
-        split_mode: str = "hybrid_sampled",
+        n_estimators="auto",
+        learning_rate="auto",
+        max_depth="auto",
+        min_samples_leaf="auto",
+        min_samples_split="auto",
+        subsample="auto",
+        split_mode: str = "auto",
         random_state=None,
         use_cpp=None,
     ):
@@ -1075,6 +1198,7 @@ class SEFRGradientBoostingRegressor(RegressorMixin, BaseEstimator):
             )
         else:
             self.__dict__.update(state)
+        _backfill_resolved_params(self)
 
     def save(self, path):
         check_is_fitted(self, ["trees_", "_cpp_core_"], all_or_any=any)
@@ -1124,6 +1248,7 @@ class SEFRGradientBoostingRegressor(RegressorMixin, BaseEstimator):
         n_samples = X.shape[0]
         if y.shape[0] != n_samples:
             raise ValueError("X and y must have the same number of samples.")
+        _resolve_boosting_params(self, n_samples, self.n_features_in_, AUTO_PARAM_NAMES)
 
         if sample_weight is not None:
             sw = _check_sample_weight(sample_weight, X, dtype=np.float64)
@@ -1134,13 +1259,13 @@ class SEFRGradientBoostingRegressor(RegressorMixin, BaseEstimator):
             w_sum = float(sw.sum()) + 1e-15
             self.init_score_ = float(np.dot(sw, y) / w_sum)
             self._cpp_core_ = SEFRBoostRegressorCore(
-                n_estimators=self.n_estimators,
-                learning_rate=self.learning_rate,
-                max_depth=self.max_depth,
-                min_samples_leaf=self.min_samples_leaf,
-                min_samples_split=self.min_samples_split,
-                subsample=self.subsample,
-                split_mode=self.split_mode,
+                n_estimators=self.n_estimators_,
+                learning_rate=self.learning_rate_,
+                max_depth=self.max_depth_,
+                min_samples_leaf=self.min_samples_leaf_,
+                min_samples_split=self.min_samples_split_,
+                subsample=self.subsample_,
+                split_mode=self.split_mode_,
                 random_state=_cpp_random_seed(self.random_state),
             )
             X_c = np.ascontiguousarray(X, dtype=np.float64)
@@ -1155,11 +1280,11 @@ class SEFRGradientBoostingRegressor(RegressorMixin, BaseEstimator):
         rng = check_random_state(self.random_state)
         self.trees_: list[_SEFRTree] = []
 
-        for _ in range(self.n_estimators):
+        for _ in range(self.n_estimators_):
             residuals = y - F
 
-            if self.subsample < 1.0:
-                n_sub = max(1, int(self.subsample * n_samples))
+            if self.subsample_ < 1.0:
+                n_sub = max(1, int(self.subsample_ * n_samples))
                 sub_idx = rng.choice(n_samples, size=n_sub, replace=False)
                 X_b = X[sub_idx]
                 r_b = residuals[sub_idx]
@@ -1173,15 +1298,15 @@ class SEFRGradientBoostingRegressor(RegressorMixin, BaseEstimator):
                 r_b,
                 p_dummy,
                 w_b,
-                max_depth=self.max_depth,
-                min_samples_leaf=self.min_samples_leaf,
-                min_samples_split=self.min_samples_split,
+                max_depth=self.max_depth_,
+                min_samples_leaf=self.min_samples_leaf_,
+                min_samples_split=self.min_samples_split_,
                 regression=True,
-                split_mode=self.split_mode,
+                split_mode=self.split_mode_,
                 rng=rng,
             )
             self.trees_.append(tree)
-            F = F + self.learning_rate * tree.predict(X)
+            F = F + self.learning_rate_ * tree.predict(X)
 
         self.F_train_ = F
         return self
@@ -1209,7 +1334,7 @@ class SEFRGradientBoostingRegressor(RegressorMixin, BaseEstimator):
             return self._cpp_core_.predict(np.ascontiguousarray(X, dtype=np.float64))
         out = np.full(X.shape[0], self.init_score_, dtype=np.float64)
         for tree in self.trees_:
-            out = out + self.learning_rate * tree.predict(X)
+            out = out + self.learning_rate_ * tree.predict(X)
         return out
 
 

@@ -9,12 +9,14 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.utils._testing import assert_allclose
 
 from prismboost.sefr_gbdt import (
+    AUTO_PARAM_NAMES,
     SEFRBoostClassifier,
     SEFRBoostRegressor,
     SEFRGradientBoostingClassifier,
     SEFRGradientBoostingRegressor,
     _mse_leaf_value,
     _newton_leaf_value,
+    auto_boosting_config,
 )
 
 
@@ -343,6 +345,71 @@ def test_high_dimensional_onehot_sparse_sefr_coef():
     clf.fit(X, y)
     assert clf.predict(X).shape == (n,)
     assert clf.predict_proba(X).shape == (n, 2)
+
+
+def test_auto_config_scales_with_sample_size():
+    small = auto_boosting_config(200, 10)
+    large = auto_boosting_config(20000, 10)
+    assert small["max_depth"] < large["max_depth"]
+    assert small["learning_rate"] < large["learning_rate"]
+    assert small["min_samples_leaf"] < large["min_samples_leaf"]
+    assert set(small) == set(AUTO_PARAM_NAMES)
+
+
+def test_auto_config_samples_axis_candidates_when_wide():
+    assert auto_boosting_config(1000, 20)["split_mode"] == "hybrid"
+    assert auto_boosting_config(1000, 500)["split_mode"] == "hybrid_sampled"
+
+
+@pytest.mark.parametrize("use_cpp", [False, True])
+def test_defaults_are_resolved_from_data(use_cpp):
+    X, y = make_classification(n_samples=600, n_features=8, random_state=0)
+    clf = SEFRGradientBoostingClassifier(random_state=0, use_cpp=use_cpp).fit(X, y)
+    expected = auto_boosting_config(600, 8)
+    assert clf.auto_config_ == expected
+    for name, value in expected.items():
+        assert getattr(clf, f"{name}_") == value
+        # Constructor params stay untouched so clone/get_params keep "auto".
+        assert getattr(clf, name) == "auto"
+
+
+def test_explicit_params_are_not_overridden():
+    X, y = make_classification(n_samples=600, n_features=8, random_state=0)
+    clf = SEFRGradientBoostingClassifier(
+        n_estimators=7, max_depth=2, random_state=0, use_cpp=False
+    ).fit(X, y)
+    assert clf.n_estimators_ == 7
+    assert clf.max_depth_ == 2
+    assert len(clf.trees_) == 7
+    assert "n_estimators" not in clf.auto_config_
+    assert "max_depth" not in clf.auto_config_
+    assert clf.auto_config_["subsample"] == auto_boosting_config(600, 8)["subsample"]
+
+
+def test_untuned_model_is_accurate_out_of_the_box():
+    X, y = load_breast_cancer(return_X_y=True)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.3, random_state=0, stratify=y
+    )
+    clf = SEFRGradientBoostingClassifier(random_state=0).fit(X_train, y_train)
+    assert clf.score(X_test, y_test) > 0.9
+
+
+def test_auto_regressor_fits_and_records_config():
+    X, y = make_regression(n_samples=400, n_features=6, random_state=0)
+    reg = SEFRGradientBoostingRegressor(random_state=0).fit(X, y)
+    assert reg.auto_config_ == auto_boosting_config(400, 6)
+    assert reg.score(X, y) > 0.5
+
+
+def test_pickle_roundtrip_keeps_resolved_params():
+    import pickle
+
+    X, y = make_classification(n_samples=300, n_features=6, random_state=0)
+    clf = SEFRGradientBoostingClassifier(random_state=0).fit(X, y)
+    loaded = pickle.loads(pickle.dumps(clf))
+    assert loaded.auto_config_ == clf.auto_config_
+    assert_allclose(loaded.predict_proba(X), clf.predict_proba(X))
 
 
 def test_scale_pos_weight_and_weighted_init():
