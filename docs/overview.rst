@@ -4,10 +4,13 @@ What Is PrismBoost?
 ``PrismBoostClassifier`` is gradient boosting with **SEFR oblique splits** at
 each internal tree node (hyperplane splits instead of axis-aligned thresholds).
 
-- Preferred name: ``PrismBoostClassifier`` / ``PrismBoostRegressor``
-- Compatibility aliases: ``SEFRBoostClassifier`` / ``SEFRBoostRegressor``
-- Long names: ``SEFRGradientBoostingClassifier`` / ``SEFRGradientBoostingRegressor``
-- Module: ``prismboost.sefr_gbdt``
+- Estimators: ``PrismBoostClassifier`` / ``PrismBoostRegressor``
+- Module: ``prismboost.prism_boost``, re-exported from the ``prismboost``
+  package root
+- Legacy names, kept as aliases of the same classes:
+  ``SEFRBoostClassifier`` / ``SEFRBoostRegressor`` and
+  ``SEFRGradientBoostingClassifier`` / ``SEFRGradientBoostingRegressor``,
+  importable from ``prismboost.sefr_boost`` and ``prismboost.sefr_gbdt``
 
 At a high level:
 

@@ -1,3 +1,5 @@
+import pickle
+
 import numpy as np
 import pytest
 from sklearn.base import is_classifier, is_regressor
@@ -8,40 +10,78 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils._testing import assert_allclose
 
-from prismboost.sefr_gbdt import (
+from prismboost import PrismBoostClassifier, PrismBoostRegressor
+from prismboost.prism_boost import (
     AUTO_PARAM_NAMES,
-    SEFRBoostClassifier,
-    SEFRBoostRegressor,
-    SEFRGradientBoostingClassifier,
-    SEFRGradientBoostingRegressor,
     _mse_leaf_value,
     _newton_leaf_value,
+    _SEFRTree,
+    _SEFRTreeNode,
     auto_boosting_config,
 )
 
 
-def test_public_aliases_are_same_classes():
-    from prismboost import PrismBoostClassifier, PrismBoostRegressor
+def test_primary_names_are_prismboost():
+    assert PrismBoostClassifier.__name__ == "PrismBoostClassifier"
+    assert PrismBoostRegressor.__name__ == "PrismBoostRegressor"
+    assert PrismBoostClassifier.__module__ == "prismboost.prism_boost"
+    assert "PrismBoostClassifier" in repr(PrismBoostClassifier())
 
-    assert SEFRBoostClassifier is SEFRGradientBoostingClassifier
-    assert SEFRBoostRegressor is SEFRGradientBoostingRegressor
-    assert PrismBoostClassifier is SEFRBoostClassifier
-    assert PrismBoostRegressor is SEFRBoostRegressor
+
+@pytest.mark.parametrize("module", ["prismboost", "prismboost.sefr_boost", "prismboost.sefr_gbdt"])
+def test_legacy_names_alias_prismboost(module):
+    import importlib
+
+    mod = importlib.import_module(module)
+    assert mod.SEFRBoostClassifier is PrismBoostClassifier
+    assert mod.SEFRBoostRegressor is PrismBoostRegressor
+    assert mod.SEFRGradientBoostingClassifier is PrismBoostClassifier
+    assert mod.SEFRGradientBoostingRegressor is PrismBoostRegressor
+
+
+def test_pickle_written_under_legacy_module_path_loads():
+    """Models pickled before the rename name ``prismboost.sefr_gbdt.*`` classes."""
+    X, y = make_classification(n_samples=120, n_features=8, random_state=0)
+    clf = PrismBoostClassifier(
+        n_estimators=5, max_depth=2, random_state=0, use_cpp=False
+    ).fit(X, y)
+    expected = clf.predict_proba(X)
+
+    renamed = (
+        (PrismBoostClassifier, "SEFRGradientBoostingClassifier"),
+        (_SEFRTree, "_SEFRTree"),
+        (_SEFRTreeNode, "_SEFRTreeNode"),
+    )
+    originals = [(cls, cls.__module__, cls.__qualname__) for cls, _ in renamed]
+    try:
+        for cls, legacy_name in renamed:
+            cls.__module__ = "prismboost.sefr_gbdt"
+            cls.__qualname__ = legacy_name
+        blob = pickle.dumps(clf)
+        loaded = pickle.loads(blob)
+    finally:
+        for cls, module, qualname in originals:
+            cls.__module__ = module
+            cls.__qualname__ = qualname
+
+    assert b"prismboost.sefr_gbdt" in blob
+    assert isinstance(loaded, PrismBoostClassifier)
+    assert_allclose(loaded.predict_proba(X), expected)
 
 
 from _utils import check_estimator, get_expected_failed_tests
 
 
-def test_sefr_gbdt_estimator():
+def test_prism_boost_estimator():
     check_estimator(
-        SEFRGradientBoostingClassifier(
+        PrismBoostClassifier(
             n_estimators=5, max_depth=2, min_samples_leaf=5, random_state=0
         ),
         expected_failed_checks=get_expected_failed_tests(
-            SEFRGradientBoostingClassifier()
+            PrismBoostClassifier()
         ),
     )
-    assert is_classifier(SEFRGradientBoostingClassifier())
+    assert is_classifier(PrismBoostClassifier())
 
 
 def test_newton_leaf_value():
@@ -59,16 +99,16 @@ def test_mse_leaf_value():
     assert_allclose(v, np.mean(r))
 
 
-def test_sefr_gbdt_regressor_estimator():
+def test_prism_boost_regressor_estimator():
     check_estimator(
-        SEFRGradientBoostingRegressor(
+        PrismBoostRegressor(
             n_estimators=5, max_depth=2, min_samples_leaf=5, random_state=0
         ),
         expected_failed_checks=get_expected_failed_tests(
-            SEFRGradientBoostingRegressor()
+            PrismBoostRegressor()
         ),
     )
-    assert is_regressor(SEFRGradientBoostingRegressor())
+    assert is_regressor(PrismBoostRegressor())
 
 
 def test_regression_fit_predict_smoke():
@@ -76,7 +116,7 @@ def test_regression_fit_predict_smoke():
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.25, random_state=0
     )
-    reg = SEFRGradientBoostingRegressor(
+    reg = PrismBoostRegressor(
         n_estimators=40,
         learning_rate=0.08,
         max_depth=3,
@@ -94,7 +134,7 @@ def test_regression_subsample_and_sample_weight():
     X, y = make_regression(n_samples=100, n_features=8, random_state=1)
     w = np.ones(len(y))
     w[:20] = 0.5
-    reg = SEFRGradientBoostingRegressor(
+    reg = PrismBoostRegressor(
         n_estimators=15,
         subsample=0.8,
         max_depth=2,
@@ -107,7 +147,7 @@ def test_regression_subsample_and_sample_weight():
 
 def test_regression_multioutput_raises():
     X, y = make_regression(n_samples=40, n_features=4, n_targets=2, random_state=0)
-    reg = SEFRGradientBoostingRegressor(n_estimators=3, random_state=0)
+    reg = PrismBoostRegressor(n_estimators=3, random_state=0)
     with pytest.raises(ValueError, match="single-target|1d array"):
         reg.fit(X, y)
 
@@ -119,7 +159,7 @@ def test_fit_predict_smoke():
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.25, random_state=0
     )
-    clf = SEFRGradientBoostingClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=30,
         learning_rate=0.1,
         max_depth=3,
@@ -146,7 +186,7 @@ def test_breast_cancer_with_scaler():
             ("scaler", StandardScaler()),
             (
                 "clf",
-                SEFRGradientBoostingClassifier(
+                PrismBoostClassifier(
                     n_estimators=50,
                     learning_rate=0.08,
                     max_depth=4,
@@ -162,7 +202,7 @@ def test_breast_cancer_with_scaler():
 
 def test_n_estimators_one():
     X, y = make_classification(n_samples=80, n_features=5, random_state=3)
-    clf = SEFRGradientBoostingClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=1, max_depth=2, min_samples_leaf=5, random_state=0, use_cpp=False
     )
     clf.fit(X, y)
@@ -171,7 +211,7 @@ def test_n_estimators_one():
 
 def test_subsample():
     X, y = make_classification(n_samples=150, n_features=8, random_state=4)
-    clf = SEFRGradientBoostingClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=15,
         subsample=0.7,
         max_depth=2,
@@ -191,7 +231,7 @@ def test_multiclass_fit_predict():
         n_clusters_per_class=1,
         random_state=0,
     )
-    clf = SEFRGradientBoostingClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=20, max_depth=2, min_samples_leaf=5, random_state=0, use_cpp=False
     )
     clf.fit(X, y)
@@ -211,7 +251,7 @@ def test_binary_decision_function_is_1d():
     X, y = make_classification(
         n_samples=120, n_features=6, n_classes=2, random_state=0
     )
-    clf = SEFRGradientBoostingClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=10, max_depth=2, min_samples_leaf=5, random_state=0
     )
     clf.fit(X, y)
@@ -228,10 +268,10 @@ def test_multiclass_ignores_scale_pos_weight():
         n_clusters_per_class=1,
         random_state=1,
     )
-    a = SEFRGradientBoostingClassifier(
+    a = PrismBoostClassifier(
         n_estimators=15, max_depth=2, min_samples_leaf=5, random_state=2
     ).fit(X, y)
-    b = SEFRGradientBoostingClassifier(
+    b = PrismBoostClassifier(
         n_estimators=15,
         max_depth=2,
         min_samples_leaf=5,
@@ -243,7 +283,7 @@ def test_multiclass_ignores_scale_pos_weight():
 
 
 def test_not_fitted():
-    clf = SEFRGradientBoostingClassifier()
+    clf = PrismBoostClassifier()
     X = np.zeros((3, 2))
     with pytest.raises(NotFittedError):
         clf.predict(X)
@@ -252,7 +292,7 @@ def test_not_fitted():
 def test_classes_order_preserved():
     X, y = make_classification(n_samples=100, n_features=4, random_state=6)
     y_flipped = np.where(y == 0, 1, 0)
-    clf = SEFRGradientBoostingClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=10, max_depth=2, min_samples_leaf=8, random_state=7
     )
     clf.fit(X, y_flipped)
@@ -265,7 +305,7 @@ def test_sample_weight():
     X, y = make_classification(n_samples=120, n_features=6, random_state=8)
     w = np.ones(len(y))
     w[y == 1] = 2.0
-    clf = SEFRGradientBoostingClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=20, max_depth=2, min_samples_leaf=8, random_state=9
     )
     clf.fit(X, y, sample_weight=w)
@@ -276,7 +316,7 @@ def test_class_weight_balanced():
     X, y = make_classification(
         n_samples=400, n_features=8, weights=[0.92, 0.08], random_state=10
     )
-    clf = SEFRGradientBoostingClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=25,
         max_depth=3,
         min_samples_leaf=10,
@@ -298,7 +338,7 @@ def _slow_tree_predict_row(tree, x: np.ndarray) -> float:
 def test_vectorized_tree_predict_matches_rowwise():
     X, y = make_classification(n_samples=150, n_features=8, random_state=20)
     # Fit a single tree via booster internals would be heavy; build tree through classifier
-    clf = SEFRGradientBoostingClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=1, max_depth=4, min_samples_leaf=5, random_state=21, use_cpp=False
     )
     clf.fit(X, y)
@@ -335,7 +375,7 @@ def test_high_dimensional_onehot_sparse_sefr_coef():
     X = ct.fit_transform(df)
     assert X.shape[1] > 64
 
-    clf = SEFRGradientBoostingClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=8,
         max_depth=4,
         min_samples_leaf=5,
@@ -364,7 +404,7 @@ def test_auto_config_samples_axis_candidates_when_wide():
 @pytest.mark.parametrize("use_cpp", [False, True])
 def test_defaults_are_resolved_from_data(use_cpp):
     X, y = make_classification(n_samples=600, n_features=8, random_state=0)
-    clf = SEFRGradientBoostingClassifier(random_state=0, use_cpp=use_cpp).fit(X, y)
+    clf = PrismBoostClassifier(random_state=0, use_cpp=use_cpp).fit(X, y)
     expected = auto_boosting_config(600, 8)
     assert clf.auto_config_ == expected
     for name, value in expected.items():
@@ -375,7 +415,7 @@ def test_defaults_are_resolved_from_data(use_cpp):
 
 def test_explicit_params_are_not_overridden():
     X, y = make_classification(n_samples=600, n_features=8, random_state=0)
-    clf = SEFRGradientBoostingClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=7, max_depth=2, random_state=0, use_cpp=False
     ).fit(X, y)
     assert clf.n_estimators_ == 7
@@ -391,13 +431,13 @@ def test_untuned_model_is_accurate_out_of_the_box():
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.3, random_state=0, stratify=y
     )
-    clf = SEFRGradientBoostingClassifier(random_state=0).fit(X_train, y_train)
+    clf = PrismBoostClassifier(random_state=0).fit(X_train, y_train)
     assert clf.score(X_test, y_test) > 0.9
 
 
 def test_auto_regressor_fits_and_records_config():
     X, y = make_regression(n_samples=400, n_features=6, random_state=0)
-    reg = SEFRGradientBoostingRegressor(random_state=0).fit(X, y)
+    reg = PrismBoostRegressor(random_state=0).fit(X, y)
     assert reg.auto_config_ == auto_boosting_config(400, 6)
     assert reg.score(X, y) > 0.5
 
@@ -406,7 +446,7 @@ def test_pickle_roundtrip_keeps_resolved_params():
     import pickle
 
     X, y = make_classification(n_samples=300, n_features=6, random_state=0)
-    clf = SEFRGradientBoostingClassifier(random_state=0).fit(X, y)
+    clf = PrismBoostClassifier(random_state=0).fit(X, y)
     loaded = pickle.loads(pickle.dumps(clf))
     assert loaded.auto_config_ == clf.auto_config_
     assert_allclose(loaded.predict_proba(X), clf.predict_proba(X))
@@ -420,12 +460,12 @@ def test_scale_pos_weight_and_weighted_init():
     sw = np.where(y == 1, sw * ew_pos, sw)
     pos_rate = np.dot(sw, y_idx) / sw.sum()
     expected_init = np.log(pos_rate / (1.0 - pos_rate))
-    clf = SEFRGradientBoostingClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=5, max_depth=2, min_samples_leaf=10, random_state=13
     )
     clf.fit(X, y, sample_weight=np.ones(len(y)))
     assert abs(clf.init_score_ - expected_init) > 1e-3
-    clf2 = SEFRGradientBoostingClassifier(
+    clf2 = PrismBoostClassifier(
         n_estimators=5,
         max_depth=2,
         min_samples_leaf=10,

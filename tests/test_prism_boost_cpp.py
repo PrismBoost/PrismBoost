@@ -1,4 +1,4 @@
-"""Tests for the optional C++ SEFRBoost backend."""
+"""Tests for the optional C++ PrismBoost backend."""
 
 import pickle
 from pathlib import Path
@@ -13,14 +13,14 @@ from sklearn.utils._testing import assert_allclose
 
 from prismboost._cpp_backend import CPP_AVAILABLE, cpp_backend_status
 from prismboost._cpp_pickle import serialized_size_bytes
-from prismboost.sefr_gbdt import SEFRBoostClassifier, SEFRBoostRegressor
+from prismboost import PrismBoostClassifier, PrismBoostRegressor
 
 
 @pytest.mark.skipif(not CPP_AVAILABLE, reason=cpp_backend_status())
 def test_cpp_classifier_pickle_roundtrip():
     X, y = load_breast_cancer(return_X_y=True)
     X = X.astype(np.float64)
-    clf = SEFRBoostClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=15, max_depth=2, min_samples_leaf=5, random_state=0, use_cpp=True
     )
     clf.fit(X, y)
@@ -36,7 +36,7 @@ def test_cpp_pipeline_pickle_size_nonzero():
     X = X.astype(np.float64)
     pipe = Pipeline([
         ("scaler", StandardScaler()),
-        ("model", SEFRBoostClassifier(n_estimators=10, max_depth=2, use_cpp=True, random_state=0)),
+        ("model", PrismBoostClassifier(n_estimators=10, max_depth=2, use_cpp=True, random_state=0)),
     ])
     pipe.fit(X, y)
     assert len(pickle.dumps(pipe, protocol=pickle.HIGHEST_PROTOCOL)) > 0
@@ -46,23 +46,23 @@ def test_cpp_pipeline_pickle_size_nonzero():
 def test_cpp_classifier_save_load(tmp_path: Path):
     X, y = load_breast_cancer(return_X_y=True)
     X = X.astype(np.float64)
-    clf = SEFRBoostClassifier(n_estimators=12, max_depth=2, use_cpp=True, random_state=1)
+    clf = PrismBoostClassifier(n_estimators=12, max_depth=2, use_cpp=True, random_state=1)
     clf.fit(X, y)
     path = tmp_path / "sefrboost.pkl"
     clf.save(path)
     assert path.stat().st_size > 0
-    loaded = SEFRBoostClassifier.load(path)
+    loaded = PrismBoostClassifier.load(path)
     assert_allclose(clf.decision_function(X), loaded.decision_function(X), rtol=1e-12)
 
 
 @pytest.mark.skipif(not CPP_AVAILABLE, reason=cpp_backend_status())
 def test_cpp_regressor_save_load(tmp_path: Path):
     X, y = make_regression(n_samples=120, n_features=8, random_state=3)
-    reg = SEFRBoostRegressor(n_estimators=10, max_depth=2, use_cpp=True, random_state=3)
+    reg = PrismBoostRegressor(n_estimators=10, max_depth=2, use_cpp=True, random_state=3)
     reg.fit(X, y)
     path = tmp_path / "sefrboost_reg.pkl"
     reg.save(path)
-    loaded = SEFRBoostRegressor.load(path)
+    loaded = PrismBoostRegressor.load(path)
     assert_allclose(reg.predict(X), loaded.predict(X), rtol=1e-12)
 
 
@@ -81,8 +81,8 @@ def test_cpp_classifier_matches_python_close():
         split_mode="sefr_only",
         random_state=0,
     )
-    py_clf = SEFRBoostClassifier(**params, use_cpp=False)
-    cpp_clf = SEFRBoostClassifier(**params, use_cpp=True)
+    py_clf = PrismBoostClassifier(**params, use_cpp=False)
+    cpp_clf = PrismBoostClassifier(**params, use_cpp=True)
     py_clf.fit(X_train, y_train)
     cpp_clf.fit(X_train, y_train)
     py_acc = py_clf.score(X_test, y_test)
@@ -99,7 +99,7 @@ def test_cpp_classifier_multiclass_smoke():
         n_classes=4,
         random_state=1,
     )
-    clf = SEFRBoostClassifier(
+    clf = PrismBoostClassifier(
         n_estimators=20,
         max_depth=2,
         min_samples_leaf=5,
@@ -115,7 +115,7 @@ def test_cpp_classifier_multiclass_smoke():
 @pytest.mark.skipif(not CPP_AVAILABLE, reason=cpp_backend_status())
 def test_cpp_regressor_smoke():
     X, y = make_regression(n_samples=200, n_features=10, noise=1.0, random_state=2)
-    reg = SEFRBoostRegressor(
+    reg = PrismBoostRegressor(
         n_estimators=30,
         max_depth=2,
         min_samples_leaf=5,

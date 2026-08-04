@@ -131,11 +131,25 @@ pip install "prismboost[dev]"        # pytest, ruff
 
 | Name | Description |
 |------|-------------|
-| `PrismBoostClassifier` | Primary classifier (sklearn-compatible) |
-| `PrismBoostRegressor` | Primary regressor |
-| `SEFRBoostClassifier` / `SEFRBoostRegressor` | Compatibility aliases |
+| `PrismBoostClassifier` | Classifier (sklearn-compatible) |
+| `PrismBoostRegressor` | Regressor |
 | `SEFR` | Linear weak learner used inside oblique splits |
 | `auto_boosting_config(n_samples, n_features)` | The `"auto"` default rules, callable for inspection |
+
+### Legacy names
+
+The project was previously called SEFRBoost. Those names are aliases of the
+classes above — the same objects, so `isinstance` checks and old pickles keep
+working — and are kept for backwards compatibility:
+
+| Legacy name | Now |
+|------|-------------|
+| `SEFRBoostClassifier` / `SEFRBoostRegressor` | `PrismBoostClassifier` / `PrismBoostRegressor` |
+| `SEFRGradientBoostingClassifier` / `SEFRGradientBoostingRegressor` | `PrismBoostClassifier` / `PrismBoostRegressor` |
+| `prismboost.sefr_gbdt`, `prismboost.sefr_boost` | `prismboost.prism_boost` |
+
+`SEFR` itself is not legacy: it is the linear model that produces each oblique
+split, and it keeps its name.
 
 ## Features
 

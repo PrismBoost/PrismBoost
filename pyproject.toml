@@ -20,6 +20,7 @@ keywords = [
     "oblique-trees",
     "prismboost",
     "sefr",
+    "sefrboost",
     "machine-learning",
 ]
 classifiers = [
