@@ -16,7 +16,10 @@ At a high level:
 
 1. It builds an additive boosting model over multiple trees.
 2. Each internal split is oblique (linear) and uses SEFR-derived hyperplanes.
-3. It supports binary and multiclass classification, plus regression, with
+3. Cut locations and leaf values come from the second-order (Newton) criterion,
+   with per-sample curvature ``p (1 - p)``; ``second_order=False`` switches to
+   the first-order variant.
+4. It supports binary and multiclass classification, plus regression, with
    ``predict`` / ``predict_proba`` where applicable.
 
 When to use it

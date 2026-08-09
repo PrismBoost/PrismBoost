@@ -407,6 +407,7 @@ class _SEFRTree:
         min_samples_split: int,
         *,
         regression: bool,
+        second_order: bool,
         split_mode: str,
         rng,
     ) -> _SEFRTreeNode:
@@ -416,7 +417,7 @@ class _SEFRTree:
         w_n = sample_weight[idx]
 
         def leaf() -> _SEFRTreeNode:
-            if regression:
+            if regression or not second_order:
                 v = _mse_leaf_value(r_n, w_n)
             else:
                 v = _newton_leaf_value(r_n, p_n, w_n)
@@ -439,7 +440,7 @@ class _SEFRTree:
         rw = rw / s
 
         X_n = X[idx]
-        if regression:
+        if regression or not second_order:
             hess = np.ones_like(r_n)
         else:
             hess = np.clip(p_n * (1.0 - p_n), 1e-10, None)
@@ -556,6 +557,7 @@ class _SEFRTree:
             min_samples_leaf,
             min_samples_split,
             regression=regression,
+            second_order=second_order,
             split_mode=split_mode,
             rng=rng,
         )
@@ -570,6 +572,7 @@ class _SEFRTree:
             min_samples_leaf,
             min_samples_split,
             regression=regression,
+            second_order=second_order,
             split_mode=split_mode,
             rng=rng,
         )
@@ -587,6 +590,7 @@ class _SEFRTree:
         min_samples_split: int,
         *,
         regression: bool = False,
+        second_order: bool = True,
         split_mode: str = "hybrid_sampled",
         rng=None,
     ) -> "_SEFRTree":
@@ -609,6 +613,7 @@ class _SEFRTree:
             min_samples_leaf=min_samples_leaf,
             min_samples_split=min_samples_split,
             regression=regression,
+            second_order=second_order,
             split_mode=split_mode,
             rng=rng,
         )
@@ -717,6 +722,17 @@ class PrismBoostClassifier(ClassifierMixin, BaseEstimator):
         ``"auto"`` uses ``'hybrid'`` up to 50 features and ``'hybrid_sampled'``
         beyond that, where scanning every axis-aligned candidate gets expensive.
 
+    second_order : bool, default=True
+        Whether to use curvature. With ``True`` (Newton boosting) the split gain
+        is ``G_L^2/H_L + G_R^2/H_R - G^2/H`` and each leaf takes the Newton step
+        ``sum(w r) / sum(w p (1 - p))``. With ``False`` (gradient boosting) the
+        per-sample Hessian is replaced by 1, so the gain reduces to variance
+        reduction and leaves hold the weighted mean residual; this is the
+        first-order ablation and it is slightly cheaper per split, but leaf
+        magnitudes change, so ``learning_rate`` is not comparable across the two
+        settings. Not supported by the C++ backend. Squared-error regression has
+        a unit Hessian already, so the regressor has no such parameter.
+
     random_state : int, RandomState instance or None, default=None
         Random seed for subsampling and ``hybrid_sampled`` feature sampling.
 
@@ -757,6 +773,7 @@ min_samples_split_, subsample_, split_mode_
         "class_weight": [StrOptions({"balanced"}), dict, None],
         "scale_pos_weight": [Interval(Real, 0.0, None, closed="neither"), None],
         "split_mode": [StrOptions(set(SPLIT_MODE_OPTIONS) | {"auto"})],
+        "second_order": ["boolean"],
         "random_state": ["random_state"],
         "use_cpp": ["boolean", None],
     }
@@ -773,6 +790,7 @@ min_samples_split_, subsample_, split_mode_
         class_weight=None,
         scale_pos_weight=None,
         split_mode: str = "auto",
+        second_order: bool = True,
         random_state=None,
         use_cpp=None,
     ):
@@ -785,6 +803,7 @@ min_samples_split_, subsample_, split_mode_
         self.class_weight = class_weight
         self.scale_pos_weight = scale_pos_weight
         self.split_mode = split_mode
+        self.second_order = second_order
         self.random_state = random_state
         self.use_cpp = use_cpp
 
@@ -825,6 +844,8 @@ min_samples_split_, subsample_, split_mode_
             )
         else:
             self.__dict__.update(state)
+        if not hasattr(self, "second_order"):
+            self.second_order = True  # pickled before the parameter existed
         _backfill_resolved_params(self)
 
     def save(self, path):
@@ -884,7 +905,15 @@ min_samples_split_, subsample_, split_mode_
         else:
             sw = np.ones(n_samples, dtype=np.float64)
 
-        if _should_use_cpp(self.use_cpp):
+        # The C++ core implements the Newton criterion only, so the first-order
+        # ablation runs on the Python backend.
+        if self.use_cpp and not self.second_order:
+            raise ValueError(
+                "use_cpp=True is not supported with second_order=False; the C++ "
+                "backend implements the Newton criterion only."
+            )
+
+        if self.second_order and _should_use_cpp(self.use_cpp):
             if self.n_classes_ == 2:
                 ew = _effective_fit_weights(
                     y_idx,
@@ -983,6 +1012,7 @@ min_samples_split_, subsample_, split_mode_
                 min_samples_leaf=self.min_samples_leaf_,
                 min_samples_split=self.min_samples_split_,
                 regression=False,
+                second_order=self.second_order,
                 split_mode=self.split_mode_,
                 rng=rng,
             )
@@ -998,8 +1028,10 @@ min_samples_split_, subsample_, split_mode_
         # (K-1)/K; the diagonal Hessian h = p_k (1 - p_k) overestimates curvature
         # for the coupled softmax, so this corrects the step magnitude. The same
         # factor is reapplied in ``_raw_F`` when reconstructing scores at predict
-        # time. The binary path keeps the full (unscaled) Newton step.
-        self.mc_leaf_scale_ = (K - 1.0) / K
+        # time. The binary path keeps the full (unscaled) Newton step. The factor
+        # is a correction to that denominator, so it does not apply to the
+        # first-order leaves used when ``second_order=False``.
+        self.mc_leaf_scale_ = (K - 1.0) / K if self.second_order else 1.0
         Y = np.eye(K, dtype=np.float64)[y_idx]  # one-hot, shape (n, K)
 
         # Multiclass effective weights: sample_weight * class_weight only.
@@ -1043,6 +1075,7 @@ min_samples_split_, subsample_, split_mode_
                     min_samples_leaf=self.min_samples_leaf_,
                     min_samples_split=self.min_samples_split_,
                     regression=False,
+                    second_order=self.second_order,
                     split_mode=self.split_mode_,
                     rng=rng,
                 )

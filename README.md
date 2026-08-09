@@ -155,6 +155,10 @@ split, and it keeps its name.
 
 - Oblique tree splits from SEFR (closed-form linear separator)
 - Binary and multiclass classification; regression
+- Newton (second-order) split gain and leaf values, as in XGBoost and CatBoost;
+  `second_order=False` selects the first-order variant, where the per-sample
+  Hessian is replaced by 1 so the gain becomes variance reduction and leaves
+  hold the mean residual
 - Optional C++ backend for faster fit/predict
 - sklearn estimator API (`fit`, `predict`, `predict_proba`, pipelines, pickling)
 - Works with Optuna / GridSearchCV / RandomizedSearchCV

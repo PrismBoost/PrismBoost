@@ -435,6 +435,60 @@ def test_untuned_model_is_accurate_out_of_the_box():
     assert clf.score(X_test, y_test) > 0.9
 
 
+def test_second_order_defaults_on_and_changes_the_fit():
+    X, y = make_classification(n_samples=400, n_features=8, random_state=3)
+    newton = PrismBoostClassifier(n_estimators=10, random_state=0, use_cpp=False).fit(X, y)
+    gradient = PrismBoostClassifier(
+        n_estimators=10, random_state=0, use_cpp=False, second_order=False
+    ).fit(X, y)
+
+    assert newton.second_order is True
+    assert not np.allclose(
+        newton.predict_proba(X), gradient.predict_proba(X)
+    ), "first-order fit should differ from the Newton fit"
+    assert gradient.score(X, y) > 0.7
+
+
+def test_first_order_leaves_are_bounded_mean_residuals():
+    """Gradient leaves hold a weighted mean residual, so |value| <= 1 for log loss."""
+    X, y = make_classification(n_samples=300, n_features=6, random_state=4)
+    clf = PrismBoostClassifier(
+        n_estimators=3, max_depth=3, random_state=0, use_cpp=False, second_order=False
+    ).fit(X, y)
+
+    def leaf_values(node):
+        if node.is_leaf:
+            return [node.value]
+        return leaf_values(node.left) + leaf_values(node.right)
+
+    values = [v for tree in clf.trees_ for v in leaf_values(tree.root_)]
+    assert values
+    assert max(abs(v) for v in values) <= 1.0
+
+
+def test_multiclass_first_order_drops_the_newton_scale():
+    X, y = make_classification(
+        n_samples=300, n_features=8, n_informative=5, n_classes=3, random_state=5
+    )
+    newton = PrismBoostClassifier(n_estimators=5, random_state=0, use_cpp=False).fit(X, y)
+    gradient = PrismBoostClassifier(
+        n_estimators=5, random_state=0, use_cpp=False, second_order=False
+    ).fit(X, y)
+    assert newton.mc_leaf_scale_ == pytest.approx(2.0 / 3.0)
+    assert gradient.mc_leaf_scale_ == 1.0
+
+
+def test_second_order_false_rejects_the_cpp_backend():
+    X, y = make_classification(n_samples=200, n_features=6, random_state=6)
+    with pytest.raises(ValueError, match=r"backend implements the Newton"):
+        PrismBoostClassifier(second_order=False, use_cpp=True).fit(X, y)
+
+
+def test_regressor_has_no_second_order_parameter():
+    """Squared error has a unit Hessian, so the ablation would be a no-op."""
+    assert "second_order" not in PrismBoostRegressor().get_params()
+
+
 def test_auto_regressor_fits_and_records_config():
     X, y = make_regression(n_samples=400, n_features=6, random_state=0)
     reg = PrismBoostRegressor(random_state=0).fit(X, y)
