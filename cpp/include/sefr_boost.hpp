@@ -54,17 +54,22 @@ struct RegressorModel {
     std::vector<Tree> trees;
 };
 
+// `reg_lambda` is the L2 penalty on leaf weights: it enters the Newton step as
+// `sum(w r) / (sum(w h) + lambda)` and the split gain as `G^2 / (H + lambda)`, the way XGBoost's
+// `reg_lambda` does. At 0.0 every formula reduces to the unregularized one.
 double newton_leaf_value(
     const double* residuals,
     const double* p,
     const double* weights,
-    int n
+    int n,
+    double reg_lambda
 );
 
 double mse_leaf_value(
     const double* residuals,
     const double* weights,
-    int n
+    int n,
+    double reg_lambda
 );
 
 void fit_sefr_linear(
@@ -83,7 +88,8 @@ std::pair<double, double> best_split_threshold(
     const double* sample_weight,
     const double* hessian,
     int n,
-    int min_samples_leaf
+    int min_samples_leaf,
+    double reg_lambda
 );
 
 std::tuple<int, double, double> best_axis_split(
@@ -95,7 +101,8 @@ std::tuple<int, double, double> best_axis_split(
     const double* hessian,
     int min_samples_leaf,
     const int* feature_indices,
-    int n_features_subset
+    int n_features_subset,
+    double reg_lambda
 );
 
 Tree grow_tree(
@@ -112,6 +119,7 @@ Tree grow_tree(
     int min_samples_split,
     bool regression,
     SplitMode split_mode,
+    double reg_lambda,
     std::mt19937& rng
 );
 
@@ -136,6 +144,7 @@ ClassifierModel fit_classifier(
     int min_samples_split,
     double subsample,
     SplitMode split_mode,
+    double reg_lambda,
     uint32_t random_state
 );
 
@@ -152,6 +161,7 @@ RegressorModel fit_regressor(
     int min_samples_split,
     double subsample,
     SplitMode split_mode,
+    double reg_lambda,
     uint32_t random_state
 );
 

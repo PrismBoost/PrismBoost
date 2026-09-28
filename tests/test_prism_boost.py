@@ -528,3 +528,92 @@ def test_scale_pos_weight_and_weighted_init():
     )
     clf2.fit(X, y, sample_weight=np.ones(len(y)))
     assert_allclose(clf2.init_score_, expected_init, rtol=1e-5)
+
+
+# --- L2 leaf regularization (reg_lambda) ---------------------------------------------
+
+
+def test_newton_leaf_value_shrinks_with_reg_lambda():
+    r = np.array([0.5, 0.5, 0.5])
+    p = np.full(3, 0.5)
+    w = np.ones(3)
+    unregularized = _newton_leaf_value(r, p, w, 0.0)
+    regularized = _newton_leaf_value(r, p, w, 5.0)
+    assert 0.0 < regularized < unregularized
+    # sum(w r) / (sum(w p(1-p)) + lambda) = 1.5 / (0.75 + 5)
+    assert_allclose(regularized, 1.5 / 5.75)
+
+
+def test_mse_leaf_value_shrinks_with_reg_lambda():
+    r = np.array([1.0, 1.0])
+    w = np.ones(2)
+    assert_allclose(_mse_leaf_value(r, w, 0.0), 1.0)
+    assert_allclose(_mse_leaf_value(r, w, 2.0), 2.0 / 4.0)
+
+
+def test_reg_lambda_defaults_to_zero_and_reproduces_unregularized_fit():
+    """The default must leave existing results untouched: lambda is opt-in."""
+    X, y = make_classification(n_samples=300, n_features=10, random_state=0)
+    default = PrismBoostClassifier(n_estimators=10, random_state=0).fit(X, y)
+    explicit = PrismBoostClassifier(n_estimators=10, random_state=0, reg_lambda=0.0).fit(X, y)
+    assert default.reg_lambda == 0.0
+    assert_allclose(default.decision_function(X), explicit.decision_function(X))
+
+
+@pytest.mark.parametrize("use_cpp", [True, False])
+def test_reg_lambda_shrinks_the_boosted_scores(use_cpp):
+    X, y = make_classification(n_samples=400, n_features=10, random_state=0)
+    scale = []
+    for reg_lambda in (0.0, 5.0):
+        model = PrismBoostClassifier(
+            n_estimators=20, random_state=0, reg_lambda=reg_lambda, use_cpp=use_cpp
+        ).fit(X, y)
+        scale.append(np.abs(model.decision_function(X)).max())
+    assert scale[1] < scale[0]
+
+
+def test_reg_lambda_agrees_between_backends():
+    X, y = make_classification(n_samples=300, n_features=8, random_state=0)
+    kwargs = dict(n_estimators=15, max_depth=3, subsample=1.0, random_state=0, reg_lambda=3.0)
+    cpp = PrismBoostClassifier(use_cpp=True, **kwargs).fit(X, y)
+    python = PrismBoostClassifier(use_cpp=False, **kwargs).fit(X, y)
+    assert_allclose(cpp.decision_function(X), python.decision_function(X), rtol=1e-6, atol=1e-8)
+
+
+def test_regressor_accepts_reg_lambda():
+    X, y = make_regression(n_samples=300, n_features=8, random_state=0)
+    plain = PrismBoostRegressor(n_estimators=10, random_state=0).fit(X, y)
+    shrunk = PrismBoostRegressor(n_estimators=10, random_state=0, reg_lambda=50.0).fit(X, y)
+    # Shrinking every leaf pulls the ensemble back toward the training mean.
+    assert np.abs(shrunk.predict(X) - y.mean()).mean() < np.abs(plain.predict(X) - y.mean()).mean()
+
+
+def test_unpickling_a_model_without_reg_lambda_defaults_to_zero():
+    X, y = make_classification(n_samples=200, n_features=6, random_state=0)
+    model = PrismBoostClassifier(n_estimators=5, random_state=0).fit(X, y)
+    state = model.__getstate__()
+    state.pop("reg_lambda")
+    revived = PrismBoostClassifier()
+    revived.__setstate__(state)
+    assert revived.reg_lambda == 0.0
+
+
+# --- multiclass probability clipping --------------------------------------------------
+
+
+@pytest.mark.parametrize("use_cpp", [True, False])
+def test_multiclass_probabilities_are_never_exactly_zero_or_one(use_cpp):
+    """A saturated softmax used to report 0.0 and 1.0, which log loss scores as infinite."""
+    X, y = make_classification(
+        n_samples=600,
+        n_features=20,
+        n_informative=12,
+        n_classes=3,
+        weights=[0.03, 0.12, 0.85],
+        random_state=0,
+    )
+    model = PrismBoostClassifier(n_estimators=200, random_state=0, use_cpp=use_cpp).fit(X, y)
+    proba = model.predict_proba(X)
+    assert proba.min() > 0.0
+    assert proba.max() < 1.0
+    assert_allclose(proba.sum(axis=1), 1.0)
