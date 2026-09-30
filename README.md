@@ -46,6 +46,27 @@ clf.max_depth_, clf.n_estimators_   # (3, 200)
 
 Class imbalance is deliberately left alone (`class_weight=None`), matching XGBoost and CatBoost defaults. To reproduce pre-0.2 behaviour, pass the old values explicitly: `n_estimators=100, learning_rate=0.1, max_depth=3, min_samples_leaf=10, min_samples_split=2, subsample=1.0, split_mode="hybrid_sampled"`.
 
+## Leaf regularization (`reg_lambda`)
+
+`reg_lambda` is the L2 penalty on leaf weights, the same knob as XGBoost's `reg_lambda`. It enters
+the Newton step as `sum(w r) / (sum(w h) + reg_lambda)` and the split gain as `G^2 / (H + reg_lambda)`.
+
+It defaults to `0.0`, so results from earlier versions are unchanged unless you set it. Raising it
+matters most on **imbalanced classification**: a nearly pure leaf has `h = p (1 - p)` close to zero,
+so the unregularized Newton step is large and the accumulated scores can saturate the softmax. On a
+3-class problem at a 2/10/88 class split, 200 rounds:
+
+| `reg_lambda` | test log loss |
+|---|---|
+| 0.0 | 0.399 |
+| 1.0 | 0.233 |
+| 5.0 | 0.207 |
+| 20.0 | 0.188 |
+
+(Predicting the class prior scores 0.437 on the same split.) Accuracy-style metrics are much less
+sensitive to this than log loss is, which is why the PMLB study above, scored on macro-F1 and
+ROC-AUC, did not surface it.
+
 ## Why oblique boosting?
 
 Axis-aligned GBDTs approximate curved boundaries with staircases. PrismBoost fits **linear (oblique) splits**, so decision surfaces on non-linear problems are typically smoother.

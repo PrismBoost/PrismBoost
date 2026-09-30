@@ -197,20 +197,25 @@ def _newton_leaf_value(
     residuals: np.ndarray,
     p: np.ndarray,
     sample_weight: np.ndarray,
+    reg_lambda: float = 0.0,
 ) -> float:
-    """Weighted log-loss Newton step: sum(w*r) / sum(w * p(1-p))."""
+    """Weighted log-loss Newton step: sum(w*r) / (sum(w * p(1-p)) + reg_lambda)."""
     h = p * (1.0 - p)
     h = np.maximum(h, 1e-10)
     num = np.sum(sample_weight * residuals)
-    den = np.sum(sample_weight * h) + 1e-10
+    den = np.sum(sample_weight * h) + reg_lambda + 1e-10
     value = num / den
     return float(np.clip(value, -_MAX_NEWTON_LEAF, _MAX_NEWTON_LEAF))
 
 
-def _mse_leaf_value(residuals: np.ndarray, sample_weight: np.ndarray) -> float:
-    """Weighted mean residual (Newton / negative-gradient step for squared loss)."""
+def _mse_leaf_value(
+    residuals: np.ndarray,
+    sample_weight: np.ndarray,
+    reg_lambda: float = 0.0,
+) -> float:
+    """Weighted mean residual, shrunk by ``reg_lambda`` (unit Hessian for squared loss)."""
     num = np.sum(sample_weight * residuals)
-    den = np.sum(sample_weight) + 1e-10
+    den = np.sum(sample_weight) + reg_lambda + 1e-10
     return float(num / den)
 
 
@@ -253,6 +258,7 @@ def _best_split_threshold(
     sample_weight: np.ndarray,
     hessian: np.ndarray,
     min_samples_leaf: int,
+    reg_lambda: float = 0.0,
 ) -> tuple[Optional[float], float]:
     """Best threshold ``t`` along the 1-D ``proj`` maximizing the GBDT split gain.
 
@@ -275,14 +281,14 @@ def _best_split_threshold(
     gh = (sample_weight * hessian)[order]
 
     g_total = float(gr.sum())
-    h_total = float(gh.sum()) + 1e-12
+    h_total = float(gh.sum()) + reg_lambda + 1e-12
 
     cum_g = np.cumsum(gr)[:-1]
     cum_h = np.cumsum(gh)[:-1]
     g_left = cum_g
-    h_left = cum_h + 1e-12
+    h_left = cum_h + reg_lambda + 1e-12
     g_right = g_total - g_left
-    h_right = h_total - h_left + 1e-12
+    h_right = h_total - cum_h
 
     n_left = np.arange(1, n)
     n_right = n - n_left
@@ -317,6 +323,7 @@ def _best_axis_split(
     sample_weight: np.ndarray,
     hessian: np.ndarray,
     min_samples_leaf: int,
+    reg_lambda: float = 0.0,
     *,
     feature_indices: Optional[np.ndarray] = None,
 ) -> tuple[Optional[int], float, float]:
@@ -350,12 +357,13 @@ def _best_axis_split(
     gh = (sample_weight * hessian)[order]
 
     g_total = float(np.sum(sample_weight * residuals))
-    h_total = float(np.sum(sample_weight * hessian)) + 1e-12
+    h_total = float(np.sum(sample_weight * hessian)) + reg_lambda + 1e-12
 
     g_left = np.cumsum(gr, axis=0)[:-1]  # (n-1, p)
-    h_left = np.cumsum(gh, axis=0)[:-1] + 1e-12
+    cum_h = np.cumsum(gh, axis=0)[:-1]
+    h_left = cum_h + reg_lambda + 1e-12
     g_right = g_total - g_left
-    h_right = h_total - h_left + 1e-12
+    h_right = h_total - cum_h
 
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         gain = (
@@ -409,6 +417,7 @@ class _SEFRTree:
         regression: bool,
         second_order: bool,
         split_mode: str,
+        reg_lambda: float,
         rng,
     ) -> _SEFRTreeNode:
         n = idx.shape[0]
@@ -418,9 +427,9 @@ class _SEFRTree:
 
         def leaf() -> _SEFRTreeNode:
             if regression or not second_order:
-                v = _mse_leaf_value(r_n, w_n)
+                v = _mse_leaf_value(r_n, w_n, reg_lambda)
             else:
-                v = _newton_leaf_value(r_n, p_n, w_n)
+                v = _newton_leaf_value(r_n, p_n, w_n, reg_lambda)
             return _SEFRTreeNode(is_leaf=True, value=v)
 
         if depth >= max_depth or n < min_samples_split:
@@ -484,7 +493,7 @@ class _SEFRTree:
                 # maximizes the GBDT split gain on the (weighted) pseudo-residuals.
                 proj = _affine_hyperplane_scores(X_n, coef, 0.0)
                 oblique_t, oblique_gain = _best_split_threshold(
-                    proj, r_n, w_n, hess, min_samples_leaf
+                    proj, r_n, w_n, hess, min_samples_leaf, reg_lambda
                 )
 
         # --- Axis-aligned candidate (optional by split_mode) ---
@@ -506,6 +515,7 @@ class _SEFRTree:
                     w_n,
                     hess,
                     min_samples_leaf,
+                    reg_lambda,
                     feature_indices=feat_idx,
                 )
 
@@ -559,6 +569,7 @@ class _SEFRTree:
             regression=regression,
             second_order=second_order,
             split_mode=split_mode,
+            reg_lambda=reg_lambda,
             rng=rng,
         )
         node.right = _SEFRTree._grow(
@@ -574,6 +585,7 @@ class _SEFRTree:
             regression=regression,
             second_order=second_order,
             split_mode=split_mode,
+            reg_lambda=reg_lambda,
             rng=rng,
         )
         return node
@@ -592,6 +604,7 @@ class _SEFRTree:
         regression: bool = False,
         second_order: bool = True,
         split_mode: str = "hybrid_sampled",
+        reg_lambda: float = 0.0,
         rng=None,
     ) -> "_SEFRTree":
         if split_mode not in SPLIT_MODE_OPTIONS:
@@ -615,6 +628,7 @@ class _SEFRTree:
             regression=regression,
             second_order=second_order,
             split_mode=split_mode,
+            reg_lambda=reg_lambda,
             rng=rng,
         )
         return cls(root)
@@ -722,6 +736,14 @@ class PrismBoostClassifier(ClassifierMixin, BaseEstimator):
         ``"auto"`` uses ``'hybrid'`` up to 50 features and ``'hybrid_sampled'``
         beyond that, where scanning every axis-aligned candidate gets expensive.
 
+    reg_lambda : float, default=0.0
+        L2 penalty on leaf weights. It enters the Newton step as
+        ``sum(w r) / (sum(w h) + reg_lambda)`` and the split gain as ``G^2 / (H + reg_lambda)``,
+        the way XGBoost's ``reg_lambda`` does. The default of 0.0 leaves the unregularized
+        behaviour in place; raising it shrinks leaf magnitudes, which matters most on imbalanced
+        classification, where a nearly pure leaf has ``h = p (1 - p)`` close to zero and the
+        unregularized step can drive the softmax to saturation.
+
     second_order : bool, default=True
         Whether to use curvature. With ``True`` (Newton boosting) the split gain
         is ``G_L^2/H_L + G_R^2/H_R - G^2/H`` and each leaf takes the Newton step
@@ -773,6 +795,7 @@ min_samples_split_, subsample_, split_mode_
         "class_weight": [StrOptions({"balanced"}), dict, None],
         "scale_pos_weight": [Interval(Real, 0.0, None, closed="neither"), None],
         "split_mode": [StrOptions(set(SPLIT_MODE_OPTIONS) | {"auto"})],
+        "reg_lambda": [Interval(Real, 0.0, None, closed="left")],
         "second_order": ["boolean"],
         "random_state": ["random_state"],
         "use_cpp": ["boolean", None],
@@ -790,6 +813,7 @@ min_samples_split_, subsample_, split_mode_
         class_weight=None,
         scale_pos_weight=None,
         split_mode: str = "auto",
+        reg_lambda: float = 0.0,
         second_order: bool = True,
         random_state=None,
         use_cpp=None,
@@ -803,6 +827,7 @@ min_samples_split_, subsample_, split_mode_
         self.class_weight = class_weight
         self.scale_pos_weight = scale_pos_weight
         self.split_mode = split_mode
+        self.reg_lambda = reg_lambda
         self.second_order = second_order
         self.random_state = random_state
         self.use_cpp = use_cpp
@@ -846,6 +871,8 @@ min_samples_split_, subsample_, split_mode_
             self.__dict__.update(state)
         if not hasattr(self, "second_order"):
             self.second_order = True  # pickled before the parameter existed
+        if not hasattr(self, "reg_lambda"):
+            self.reg_lambda = 0.0  # pickled before the parameter existed
         _backfill_resolved_params(self)
 
     def save(self, path):
@@ -948,6 +975,7 @@ min_samples_split_, subsample_, split_mode_
                 min_samples_split=self.min_samples_split_,
                 subsample=self.subsample_,
                 split_mode=self.split_mode_,
+                reg_lambda=float(self.reg_lambda),
                 random_state=_cpp_random_seed(self.random_state),
             )
             X_c = np.ascontiguousarray(X, dtype=np.float64)
@@ -1014,6 +1042,7 @@ min_samples_split_, subsample_, split_mode_
                 regression=False,
                 second_order=self.second_order,
                 split_mode=self.split_mode_,
+                reg_lambda=float(self.reg_lambda),
                 rng=rng,
             )
             self.trees_.append(tree)
@@ -1077,6 +1106,7 @@ min_samples_split_, subsample_, split_mode_
                     regression=False,
                     second_order=self.second_order,
                     split_mode=self.split_mode_,
+                    reg_lambda=float(self.reg_lambda),
                     rng=rng,
                 )
                 stage_trees.append(tree)
@@ -1131,10 +1161,14 @@ min_samples_split_, subsample_, split_mode_
             proba_pos = 1.0 / (1.0 + np.exp(-df))
             proba_pos = np.clip(proba_pos, 1e-10, 1.0 - 1e-10)
             return np.column_stack((1.0 - proba_pos, proba_pos))
-        # df is the (n, K) score matrix; softmax with max-subtraction.
+        # df is the (n, K) score matrix; softmax with max-subtraction. Clipped like the binary
+        # path: a saturated softmax would otherwise report exactly 0 or 1, which log loss reads
+        # as an infinite penalty on a single wrong row.
         Fmax = df.max(axis=1, keepdims=True)
         expF = np.exp(df - Fmax)
-        return expF / expF.sum(axis=1, keepdims=True)
+        proba = expF / expF.sum(axis=1, keepdims=True)
+        proba = np.clip(proba, 1e-10, 1.0 - 1e-10)
+        return proba / proba.sum(axis=1, keepdims=True)
 
     def predict(self, X):
         proba = self.predict_proba(X)
@@ -1153,9 +1187,11 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
     weighted mean of ``y``.
 
     Parameters are the same as :class:`PrismBoostClassifier` except
-    ``class_weight`` and ``scale_pos_weight`` are not used. Capacity parameters
-    default to ``"auto"`` and are resolved from the training set shape by
-    :func:`auto_boosting_config`; see ``auto_config_`` for what was derived.
+    ``class_weight``, ``scale_pos_weight`` and ``second_order`` are not used (squared error has
+    a unit Hessian already). Capacity parameters default to ``"auto"`` and are resolved from the
+    training set shape by :func:`auto_boosting_config`; see ``auto_config_`` for what was
+    derived. ``reg_lambda`` (default 0.0) is the L2 penalty on leaf weights, entering the leaf
+    as ``sum(w r) / (sum(w) + reg_lambda)`` and the split gain as ``G^2 / (H + reg_lambda)``.
 
     Notes
     -----
@@ -1170,6 +1206,7 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
         "min_samples_split": [Interval(Integral, 2, None, closed="left"), StrOptions({"auto"})],
         "subsample": [Interval(Real, 0.0, 1.0, closed="right"), StrOptions({"auto"})],
         "split_mode": [StrOptions(set(SPLIT_MODE_OPTIONS) | {"auto"})],
+        "reg_lambda": [Interval(Real, 0.0, None, closed="left")],
         "random_state": ["random_state"],
         "use_cpp": ["boolean", None],
     }
@@ -1184,6 +1221,7 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
         min_samples_split="auto",
         subsample="auto",
         split_mode: str = "auto",
+        reg_lambda: float = 0.0,
         random_state=None,
         use_cpp=None,
     ):
@@ -1194,6 +1232,7 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
         self.min_samples_split = min_samples_split
         self.subsample = subsample
         self.split_mode = split_mode
+        self.reg_lambda = reg_lambda
         self.random_state = random_state
         self.use_cpp = use_cpp
 
@@ -1305,6 +1344,7 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
                 min_samples_split=self.min_samples_split_,
                 subsample=self.subsample_,
                 split_mode=self.split_mode_,
+                reg_lambda=float(self.reg_lambda),
                 random_state=_cpp_random_seed(self.random_state),
             )
             X_c = np.ascontiguousarray(X, dtype=np.float64)
@@ -1342,6 +1382,7 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
                 min_samples_split=self.min_samples_split_,
                 regression=True,
                 split_mode=self.split_mode_,
+                reg_lambda=float(self.reg_lambda),
                 rng=rng,
             )
             self.trees_.append(tree)

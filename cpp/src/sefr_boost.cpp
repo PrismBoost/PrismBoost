@@ -65,7 +65,8 @@ double newton_leaf_value(
     const double* residuals,
     const double* p,
     const double* weights,
-    int n
+    int n,
+    double reg_lambda
 ) {
     double num = 0.0;
     double den = 0.0;
@@ -74,6 +75,7 @@ double newton_leaf_value(
         num += weights[i] * residuals[i];
         den += weights[i] * h;
     }
+    den += reg_lambda;
     den += 1e-10;
     return clip(num / den, -kMaxNewtonLeaf, kMaxNewtonLeaf);
 }
@@ -81,7 +83,8 @@ double newton_leaf_value(
 double mse_leaf_value(
     const double* residuals,
     const double* weights,
-    int n
+    int n,
+    double reg_lambda
 ) {
     double num = 0.0;
     double den = 0.0;
@@ -89,6 +92,7 @@ double mse_leaf_value(
         num += weights[i] * residuals[i];
         den += weights[i];
     }
+    den += reg_lambda;
     den += 1e-10;
     return num / den;
 }
@@ -165,7 +169,8 @@ std::pair<double, double> best_split_threshold(
     const double* sample_weight,
     const double* hessian,
     int n,
-    int min_samples_leaf
+    int min_samples_leaf,
+    double reg_lambda
 ) {
     const int msl = std::max(1, min_samples_leaf);
     if (n < 2 * msl) {
@@ -189,7 +194,7 @@ std::pair<double, double> best_split_threshold(
         g_total += gr[static_cast<size_t>(i)];
         h_total += gh[static_cast<size_t>(i)];
     }
-    h_total += kEps;
+    h_total += reg_lambda + kEps;
 
     int best = -1;
     double best_gain = -std::numeric_limits<double>::infinity();
@@ -209,7 +214,7 @@ std::pair<double, double> best_split_threshold(
             continue;
         }
         const double g_left = cum_g;
-        const double h_left = cum_h + kEps;
+        const double h_left = cum_h + reg_lambda + kEps;
         const double g_right = g_total - g_left;
         const double h_right = h_total - cum_h + kEps;
         const double gain =
@@ -239,7 +244,8 @@ std::tuple<int, double, double> best_axis_split(
     const double* hessian,
     int min_samples_leaf,
     const int* feature_indices,
-    int n_features_subset
+    int n_features_subset,
+    double reg_lambda
 ) {
     const int msl = std::max(1, min_samples_leaf);
     if (n < 2 * msl) {
@@ -253,7 +259,7 @@ std::tuple<int, double, double> best_axis_split(
         g_total += sample_weight[i] * residuals[i];
         h_total += sample_weight[i] * hessian[i];
     }
-    h_total += kEps;
+    h_total += reg_lambda + kEps;
 
     int best_j = -1;
     double best_thr = 0.0;
@@ -297,7 +303,7 @@ std::tuple<int, double, double> best_axis_split(
                 continue;
             }
             const double g_left = cum_g;
-            const double h_left = cum_h + kEps;
+            const double h_left = cum_h + reg_lambda + kEps;
             const double g_right = g_total - g_left;
             const double h_right = h_total - cum_h + kEps;
             const double gain =
@@ -331,6 +337,7 @@ Tree grow_tree(
     int min_samples_split,
     bool regression,
     SplitMode split_mode,
+    double reg_lambda,
     std::mt19937& rng
 ) {
     Tree tree;
@@ -382,10 +389,10 @@ Tree grow_tree(
             tree.nodes[static_cast<size_t>(node_id)].is_leaf = true;
             if (regression) {
                 tree.nodes[static_cast<size_t>(node_id)].value =
-                    mse_leaf_value(r_n.data(), w_n.data(), n);
+                    mse_leaf_value(r_n.data(), w_n.data(), n, reg_lambda);
             } else {
                 tree.nodes[static_cast<size_t>(node_id)].value =
-                    newton_leaf_value(r_n.data(), p_n.data(), w_n.data(), n);
+                    newton_leaf_value(r_n.data(), p_n.data(), w_n.data(), n, reg_lambda);
             }
         };
 
@@ -493,7 +500,8 @@ Tree grow_tree(
                     w_n.data(),
                     hess.data(),
                     n,
-                    min_samples_leaf
+                    min_samples_leaf,
+                    reg_lambda
                 );
                 oblique_t = split.first;
                 oblique_gain = split.second;
@@ -534,7 +542,8 @@ Tree grow_tree(
                     hess.data(),
                     min_samples_leaf,
                     feat_ptr,
-                    feat_n
+                    feat_n,
+                    reg_lambda
                 );
                 axis_j = std::get<0>(axis);
                 axis_thr = std::get<1>(axis);
@@ -645,6 +654,7 @@ ClassifierModel fit_classifier(
     int min_samples_split,
     double subsample,
     SplitMode split_mode,
+    double reg_lambda,
     uint32_t random_state
 ) {
     ClassifierModel model;
@@ -731,6 +741,7 @@ ClassifierModel fit_classifier(
                 min_samples_split,
                 false,
                 split_mode,
+                reg_lambda,
                 rng
             );
             model.trees_flat.push_back(std::move(tree));
@@ -829,6 +840,7 @@ ClassifierModel fit_classifier(
                 min_samples_split,
                 false,
                 split_mode,
+                reg_lambda,
                 rng
             );
             model.trees_flat.push_back(std::move(tree));
@@ -858,6 +870,7 @@ RegressorModel fit_regressor(
     int min_samples_split,
     double subsample,
     SplitMode split_mode,
+    double reg_lambda,
     uint32_t random_state
 ) {
     RegressorModel model;
@@ -912,6 +925,7 @@ RegressorModel fit_regressor(
             min_samples_split,
             true,
             split_mode,
+            reg_lambda,
             rng
         );
         model.trees.push_back(std::move(tree));
@@ -999,8 +1013,14 @@ std::vector<std::vector<double>> predict_classifier_proba_multiclass(
                 std::exp(F[static_cast<size_t>(i)][static_cast<size_t>(k)] - fmax);
             denom += proba[static_cast<size_t>(i)][static_cast<size_t>(k)];
         }
+        double renorm = 0.0;
         for (int k = 0; k < model.n_classes; ++k) {
-            proba[static_cast<size_t>(i)][static_cast<size_t>(k)] /= denom;
+            proba[static_cast<size_t>(i)][static_cast<size_t>(k)] =
+                clip(proba[static_cast<size_t>(i)][static_cast<size_t>(k)] / denom, 1e-10, 1.0 - 1e-10);
+            renorm += proba[static_cast<size_t>(i)][static_cast<size_t>(k)];
+        }
+        for (int k = 0; k < model.n_classes; ++k) {
+            proba[static_cast<size_t>(i)][static_cast<size_t>(k)] /= renorm;
         }
     }
     return proba;

@@ -56,6 +56,7 @@ public:
         int min_samples_split = 2,
         double subsample = 1.0,
         const std::string& split_mode = "hybrid_sampled",
+        double reg_lambda = 0.0,
         uint32_t random_state = 0
     )
         : n_estimators_(n_estimators),
@@ -65,6 +66,7 @@ public:
           min_samples_split_(min_samples_split),
           subsample_(subsample),
           split_mode_(sefrboost::parse_split_mode(split_mode)),
+          reg_lambda_(reg_lambda),
           random_state_(random_state) {}
 
     void fit(
@@ -116,6 +118,7 @@ public:
             min_samples_split_,
             subsample_,
             split_mode_,
+            reg_lambda_,
             random_state_
         );
         fitted_ = true;
@@ -276,6 +279,9 @@ private:
     int min_samples_split_;
     double subsample_;
     sefrboost::SplitMode split_mode_;
+    // Fit-time only, so it is deliberately absent from the serialized core state: the blob holds
+    // the fitted trees, prediction never reads it, and every `fit` builds a fresh core.
+    double reg_lambda_;
     uint32_t random_state_;
     bool fitted_ = false;
     int n_features_in_ = 0;
@@ -293,6 +299,7 @@ public:
         int min_samples_split = 2,
         double subsample = 1.0,
         const std::string& split_mode = "hybrid_sampled",
+        double reg_lambda = 0.0,
         uint32_t random_state = 0
     )
         : n_estimators_(n_estimators),
@@ -302,6 +309,7 @@ public:
           min_samples_split_(min_samples_split),
           subsample_(subsample),
           split_mode_(sefrboost::parse_split_mode(split_mode)),
+          reg_lambda_(reg_lambda),
           random_state_(random_state) {}
 
     void fit(
@@ -345,6 +353,7 @@ public:
             min_samples_split_,
             subsample_,
             split_mode_,
+            reg_lambda_,
             random_state_
         );
         fitted_ = true;
@@ -424,6 +433,9 @@ private:
     int min_samples_split_;
     double subsample_;
     sefrboost::SplitMode split_mode_;
+    // Fit-time only, so it is deliberately absent from the serialized core state: the blob holds
+    // the fitted trees, prediction never reads it, and every `fit` builds a fresh core.
+    double reg_lambda_;
     uint32_t random_state_;
     bool fitted_ = false;
     int n_features_in_ = 0;
@@ -435,7 +447,7 @@ PYBIND11_MODULE(_sefr_boost_core, m) {
 
     py::class_<SEFRBoostClassifierCore>(m, "SEFRBoostClassifierCore")
         .def(
-            py::init<int, double, int, int, int, double, std::string, uint32_t>(),
+            py::init<int, double, int, int, int, double, std::string, double, uint32_t>(),
             py::arg("n_estimators") = 100,
             py::arg("learning_rate") = 0.1,
             py::arg("max_depth") = 3,
@@ -443,6 +455,7 @@ PYBIND11_MODULE(_sefr_boost_core, m) {
             py::arg("min_samples_split") = 2,
             py::arg("subsample") = 1.0,
             py::arg("split_mode") = "hybrid_sampled",
+            py::arg("reg_lambda") = 0.0,
             py::arg("random_state") = 0
         )
         .def("fit", &SEFRBoostClassifierCore::fit, py::arg("X"), py::arg("y_idx"), py::arg("sample_weight") = py::none())
@@ -458,7 +471,7 @@ PYBIND11_MODULE(_sefr_boost_core, m) {
 
     py::class_<SEFRBoostRegressorCore>(m, "SEFRBoostRegressorCore")
         .def(
-            py::init<int, double, int, int, int, double, std::string, uint32_t>(),
+            py::init<int, double, int, int, int, double, std::string, double, uint32_t>(),
             py::arg("n_estimators") = 100,
             py::arg("learning_rate") = 0.1,
             py::arg("max_depth") = 3,
@@ -466,6 +479,7 @@ PYBIND11_MODULE(_sefr_boost_core, m) {
             py::arg("min_samples_split") = 2,
             py::arg("subsample") = 1.0,
             py::arg("split_mode") = "hybrid_sampled",
+            py::arg("reg_lambda") = 0.0,
             py::arg("random_state") = 0
         )
         .def("fit", &SEFRBoostRegressorCore::fit, py::arg("X"), py::arg("y"), py::arg("sample_weight") = py::none())
