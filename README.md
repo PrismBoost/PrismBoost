@@ -67,6 +67,11 @@ so the unregularized Newton step is large and the accumulated scores can saturat
 sensitive to this than log loss is, which is why the PMLB study above, scored on macro-F1 and
 ROC-AUC, did not surface it.
 
+Measured directly: over 33 PMLB datasets with Optuna tuning, `reg_lambda` is neutral on ROC-AUC
+(13 wins, 16 losses, median difference 0.0000). It acts on calibrated probabilities, so tune it
+when you score with a proper scoring rule such as log loss, or when classes are imbalanced, and
+expect little from it on ranking metrics.
+
 ## Why oblique boosting?
 
 Axis-aligned GBDTs approximate curved boundaries with staircases. PrismBoost fits **linear (oblique) splits**, so decision surfaces on non-linear problems are typically smoother.
@@ -88,6 +93,12 @@ Axis-aligned GBDTs approximate curved boundaries with staircases. PrismBoost fit
 </p>
 
 ## Benchmark highlights (PMLB)
+
+> [!NOTE]
+> These numbers were produced before 0.3.0 and understate PrismBoost. The C++ core was
+> compiled with `-ffast-math` at the time, which broke the split search (see the 0.3.0
+> release notes); removing it improved ROC-AUC on 22 of 30 re-run datasets, by up to
+> 0.02. The table below is the 0.2.0 result and a full re-run is pending.
 
 Evaluated on **121** Penn Machine Learning Benchmark classification datasets against strong baselines (CatBoost, LightGBM, LightGBM-linear, XGBoost, SPORF, Random Forest, Logistic Regression). Hyperparameters are tuned with Optuna; scores are repeated stratified CV.
 
