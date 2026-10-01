@@ -16,6 +16,126 @@ double clip(double x, double lo, double hi) {
     return std::max(lo, std::min(hi, x));
 }
 
+// Tracks the validation loss per stage and decides when to stop. `best` is a stage count, so 0
+// means no stage has produced a finite loss yet.
+class EarlyStopper {
+public:
+    explicit EarlyStopper(int rounds) : rounds_(rounds) {}
+
+    bool update(double loss, int stages) {
+        losses_.push_back(loss);
+        if (loss < best_loss_) {
+            best_loss_ = loss;
+            best_ = stages;
+        }
+        return rounds_ > 0 && stages - best_ >= rounds_;
+    }
+
+    // Truncate `trees` to the best stage when early stopping is on, record the losses on the
+    // model, and return the number of stages kept.
+    int finish(std::vector<Tree>& trees, int trees_per_stage, std::vector<double>& losses_out) {
+        losses_out = losses_;
+        const int fitted = static_cast<int>(trees.size()) / trees_per_stage;
+        if (rounds_ <= 0 || best_ == 0) {
+            return fitted;
+        }
+        trees.resize(static_cast<size_t>(best_) * static_cast<size_t>(trees_per_stage));
+        return best_;
+    }
+
+private:
+    int rounds_;
+    int best_ = 0;
+    double best_loss_ = std::numeric_limits<double>::infinity();
+    std::vector<double> losses_;
+};
+
+bool has_validation(const ValidationSet& validation) {
+    return validation.X != nullptr && validation.n_samples > 0;
+}
+
+void add_tree_scores(
+    const Tree& tree,
+    const ValidationSet& validation,
+    int n_features,
+    double scale,
+    std::vector<double>& F
+) {
+    const std::vector<double> pred = predict_tree(tree, validation.X, validation.n_samples, n_features);
+    for (int i = 0; i < validation.n_samples; ++i) {
+        F[static_cast<size_t>(i)] += scale * pred[static_cast<size_t>(i)];
+    }
+}
+
+// Mean log loss over rows with a known class, using the probabilities `predict_proba` returns.
+double binary_log_loss(const std::vector<double>& F, const int64_t* y_idx) {
+    double total = 0.0;
+    int count = 0;
+    for (size_t i = 0; i < F.size(); ++i) {
+        if (y_idx[i] < 0) {
+            continue;
+        }
+        const double p = clip(1.0 / (1.0 + std::exp(-F[i])), 1e-10, 1.0 - 1e-10);
+        total -= std::log(y_idx[i] == 1 ? p : 1.0 - p);
+        ++count;
+    }
+    return total / static_cast<double>(count);
+}
+
+// `F` is row-major `(n_samples, n_classes)`; probabilities match `predict_proba`.
+double multiclass_log_loss(const std::vector<double>& F, int n_classes, const int64_t* y_idx) {
+    const size_t K = static_cast<size_t>(n_classes);
+    const size_t n = F.size() / K;
+    std::vector<double> proba(K);
+    double total = 0.0;
+    int count = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (y_idx[i] < 0) {
+            continue;
+        }
+        const double* row = F.data() + i * K;
+        const double fmax = *std::max_element(row, row + K);
+        double denom = 0.0;
+        for (size_t k = 0; k < K; ++k) {
+            proba[k] = std::exp(row[k] - fmax);
+            denom += proba[k];
+        }
+        double renorm = 0.0;
+        for (size_t k = 0; k < K; ++k) {
+            proba[k] = clip(proba[k] / denom, 1e-10, 1.0 - 1e-10);
+            renorm += proba[k];
+        }
+        total -= std::log(proba[static_cast<size_t>(y_idx[i])] / renorm);
+        ++count;
+    }
+    return total / static_cast<double>(count);
+}
+
+double squared_error(const std::vector<double>& F, const double* y) {
+    double total = 0.0;
+    for (size_t i = 0; i < F.size(); ++i) {
+        const double d = y[i] - F[i];
+        total += d * d;
+    }
+    return total / static_cast<double>(F.size());
+}
+
+void check_validation_classes(const ValidationSet& validation, int n_classes) {
+    if (!has_validation(validation)) {
+        return;
+    }
+    bool any_known = false;
+    for (int i = 0; i < validation.n_samples; ++i) {
+        if (validation.y_idx[i] >= n_classes) {
+            throw std::invalid_argument("validation labels must be less than the number of classes");
+        }
+        any_known = any_known || validation.y_idx[i] >= 0;
+    }
+    if (!any_known) {
+        throw std::invalid_argument("validation set has no rows with a class seen in training");
+    }
+}
+
 void sanitize_coef(std::vector<double>& coef) {
     for (double& c : coef) {
         if (!std::isfinite(c)) {
@@ -655,8 +775,13 @@ ClassifierModel fit_classifier(
     double subsample,
     SplitMode split_mode,
     double reg_lambda,
-    uint32_t random_state
+    uint32_t random_state,
+    const ValidationSet& validation
 ) {
+    check_validation_classes(validation, n_classes);
+    const bool validating = has_validation(validation);
+    EarlyStopper stopper(validation.early_stopping_rounds);
+
     ClassifierModel model;
     model.n_features = n_features;
     model.n_classes = n_classes;
@@ -678,6 +803,9 @@ ClassifierModel fit_classifier(
         model.init_score = {std::log(pos_rate / (1.0 - pos_rate))};
 
         std::vector<double> F(static_cast<size_t>(n_samples), model.init_score[0]);
+        std::vector<double> F_val(
+            static_cast<size_t>(validating ? validation.n_samples : 0), model.init_score[0]
+        );
         model.trees_flat.reserve(static_cast<size_t>(n_estimators));
 
         for (int stage = 0; stage < n_estimators; ++stage) {
@@ -751,7 +879,15 @@ ClassifierModel fit_classifier(
             for (int i = 0; i < n_samples; ++i) {
                 F[static_cast<size_t>(i)] += learning_rate * pred[static_cast<size_t>(i)];
             }
+
+            if (validating) {
+                add_tree_scores(model.trees_flat.back(), validation, n_features, learning_rate, F_val);
+                if (stopper.update(binary_log_loss(F_val, validation.y_idx), stage + 1)) {
+                    break;
+                }
+            }
         }
+        model.best_iteration = stopper.finish(model.trees_flat, 1, model.validation_loss);
         return model;
     }
 
@@ -775,6 +911,19 @@ ClassifierModel fit_classifier(
     );
     for (int i = 0; i < n_samples; ++i) {
         F[static_cast<size_t>(i)] = model.init_score;
+    }
+
+    // Row-major (n_val, K) validation scores.
+    std::vector<double> F_val;
+    if (validating) {
+        F_val.resize(static_cast<size_t>(validation.n_samples) * static_cast<size_t>(n_classes));
+        for (int i = 0; i < validation.n_samples; ++i) {
+            std::copy(
+                model.init_score.begin(),
+                model.init_score.end(),
+                F_val.begin() + static_cast<std::ptrdiff_t>(i) * n_classes
+            );
+        }
     }
 
     model.trees_flat.reserve(static_cast<size_t>(n_estimators * n_classes));
@@ -851,9 +1000,25 @@ ClassifierModel fit_classifier(
                 F[static_cast<size_t>(i)][static_cast<size_t>(k)] +=
                     learning_rate * model.mc_leaf_scale * pred[static_cast<size_t>(i)];
             }
+
+            if (validating) {
+                const std::vector<double> pred_val = predict_tree(
+                    model.trees_flat.back(), validation.X, validation.n_samples, n_features
+                );
+                for (int i = 0; i < validation.n_samples; ++i) {
+                    F_val[static_cast<size_t>(i) * static_cast<size_t>(n_classes) + static_cast<size_t>(k)] +=
+                        learning_rate * model.mc_leaf_scale * pred_val[static_cast<size_t>(i)];
+                }
+            }
+        }
+
+        if (validating &&
+            stopper.update(multiclass_log_loss(F_val, n_classes, validation.y_idx), stage + 1)) {
+            break;
         }
     }
 
+    model.best_iteration = stopper.finish(model.trees_flat, n_classes, model.validation_loss);
     return model;
 }
 
@@ -871,8 +1036,12 @@ RegressorModel fit_regressor(
     double subsample,
     SplitMode split_mode,
     double reg_lambda,
-    uint32_t random_state
+    uint32_t random_state,
+    const ValidationSet& validation
 ) {
+    const bool validating = has_validation(validation);
+    EarlyStopper stopper(validation.early_stopping_rounds);
+
     RegressorModel model;
     model.n_features = n_features;
     model.learning_rate = learning_rate;
@@ -886,6 +1055,9 @@ RegressorModel fit_regressor(
     model.init_score = y_sum / (w_sum + 1e-15);
 
     std::vector<double> F(static_cast<size_t>(n_samples), model.init_score);
+    std::vector<double> F_val(
+        static_cast<size_t>(validating ? validation.n_samples : 0), model.init_score
+    );
     model.trees.reserve(static_cast<size_t>(n_estimators));
     std::mt19937 rng(random_state);
 
@@ -935,8 +1107,16 @@ RegressorModel fit_regressor(
         for (int i = 0; i < n_samples; ++i) {
             F[static_cast<size_t>(i)] += learning_rate * pred[static_cast<size_t>(i)];
         }
+
+        if (validating) {
+            add_tree_scores(model.trees.back(), validation, n_features, learning_rate, F_val);
+            if (stopper.update(squared_error(F_val, validation.y), stage + 1)) {
+                break;
+            }
+        }
     }
 
+    model.best_iteration = stopper.finish(model.trees, 1, model.validation_loss);
     return model;
 }
 

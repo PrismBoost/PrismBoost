@@ -2,6 +2,30 @@
 
 Notable changes per release. Dates are release dates on PyPI.
 
+## 0.4.0 (2026-10-01)
+
+### Added
+
+- Early stopping. `fit` accepts `eval_set=(X_val, y_val)` and the estimators accept
+  `early_stopping_rounds`, so a fit stops once the validation loss has not improved for that many
+  stages and the ensemble is truncated to the best one. `n_estimators` becomes an upper bound,
+  `best_iteration_` reports the stages kept and `validation_loss_` the loss after each fitted
+  stage. Refitting with `n_estimators=best_iteration_` and the same `random_state` reproduces the
+  early-stopped model. Passing `eval_set` alone records `validation_loss_` without stopping.
+  Implemented in the C++ core and the NumPy backend, for the classifier and the regressor.
+  Validation rows whose class was unseen in training are left out of the loss.
+
+  The loss is fixed: log loss for classifiers, squared error for the regressor. There is no hook
+  for a different criterion yet, so a caller that selects on another metric cannot drive the
+  stopping decision.
+
+### Known gaps
+
+- No wall-clock budget. A fit runs to `n_estimators` or to early stopping, so a caller that needs
+  to bound fit time has to bound the round count instead.
+- Single-threaded: the C++ core links no OpenMP and the Python backend is NumPy-level, so there is
+  no thread-count parameter.
+
 ## 0.3.0 (2026-09-30)
 
 ### Results change on upgrade

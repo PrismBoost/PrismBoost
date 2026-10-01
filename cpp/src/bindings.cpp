@@ -44,6 +44,38 @@ py::array_t<int64_t> as_1d_int64(py::array_t<int64_t> arr, const char* name) {
     return py::array_t<int64_t, py::array::c_style | py::array::forcecast>::ensure(arr);
 }
 
+// Holds the converted arrays so the pointers in `ValidationSet` stay valid during `fit`.
+struct ValidationArrays {
+    py::array_t<double> X;
+    py::array_t<int64_t> y_idx;
+    py::array_t<double> y;
+    sefrboost::ValidationSet set;
+};
+
+void read_validation_X(
+    const py::object& X_val,
+    int n_features,
+    int early_stopping_rounds,
+    ValidationArrays& out
+) {
+    if (early_stopping_rounds < 0) {
+        throw std::invalid_argument("early_stopping_rounds must be non-negative");
+    }
+    out.set.early_stopping_rounds = early_stopping_rounds;
+    if (X_val.is_none()) {
+        if (early_stopping_rounds > 0) {
+            throw std::invalid_argument("early_stopping_rounds requires X_val and y_val");
+        }
+        return;
+    }
+    out.X = as_2d_c_contiguous(X_val.cast<py::array_t<double>>(), "X_val");
+    if (static_cast<int>(out.X.shape(1)) != n_features) {
+        throw std::invalid_argument("X_val has incorrect number of features");
+    }
+    out.set.X = static_cast<const double*>(out.X.request().ptr);
+    out.set.n_samples = static_cast<int>(out.X.shape(0));
+}
+
 }  // namespace
 
 class SEFRBoostClassifierCore {
@@ -72,7 +104,10 @@ public:
     void fit(
         py::array_t<double> X,
         py::array_t<int64_t> y_idx,
-        py::object sample_weight = py::none()
+        py::object sample_weight = py::none(),
+        py::object X_val = py::none(),
+        py::object y_val_idx = py::none(),
+        int early_stopping_rounds = 0
     ) {
         X = as_2d_c_contiguous(X, "X");
         y_idx = as_1d_int64(y_idx, "y_idx");
@@ -104,6 +139,19 @@ public:
         n_classes_ = n_classes;
         n_features_in_ = n_features;
 
+        ValidationArrays validation;
+        read_validation_X(X_val, n_features, early_stopping_rounds, validation);
+        if (validation.set.X != nullptr) {
+            if (y_val_idx.is_none()) {
+                throw std::invalid_argument("X_val requires y_val_idx");
+            }
+            validation.y_idx = as_1d_int64(y_val_idx.cast<py::array_t<int64_t>>(), "y_val_idx");
+            if (validation.y_idx.shape(0) != validation.set.n_samples) {
+                throw std::invalid_argument("X_val and y_val_idx must have the same number of rows");
+            }
+            validation.set.y_idx = static_cast<const int64_t*>(validation.y_idx.request().ptr);
+        }
+
         model_ = sefrboost::fit_classifier(
             static_cast<const double*>(xbuf.ptr),
             n_samples,
@@ -119,7 +167,8 @@ public:
             subsample_,
             split_mode_,
             reg_lambda_,
-            random_state_
+            random_state_,
+            validation.set
         );
         fitted_ = true;
     }
@@ -223,6 +272,8 @@ public:
     }
 
     bool fitted() const { return fitted_; }
+    std::vector<double> validation_loss() const { return model_.validation_loss; }
+    int best_iteration() const { return model_.best_iteration; }
     int n_features_in() const { return n_features_in_; }
     int n_classes() const { return n_classes_; }
     std::size_t model_size_bytes() const {
@@ -315,7 +366,10 @@ public:
     void fit(
         py::array_t<double> X,
         py::array_t<double> y,
-        py::object sample_weight = py::none()
+        py::object sample_weight = py::none(),
+        py::object X_val = py::none(),
+        py::object y_val = py::none(),
+        int early_stopping_rounds = 0
     ) {
         X = as_2d_c_contiguous(X, "X");
         y = as_1d(y, "y");
@@ -340,6 +394,19 @@ public:
             std::copy(sw_ptr, sw_ptr + n_samples, sw.begin());
         }
 
+        ValidationArrays validation;
+        read_validation_X(X_val, n_features, early_stopping_rounds, validation);
+        if (validation.set.X != nullptr) {
+            if (y_val.is_none()) {
+                throw std::invalid_argument("X_val requires y_val");
+            }
+            validation.y = as_1d(y_val.cast<py::array_t<double>>(), "y_val");
+            if (validation.y.shape(0) != validation.set.n_samples) {
+                throw std::invalid_argument("X_val and y_val must have the same number of rows");
+            }
+            validation.set.y = static_cast<const double*>(validation.y.request().ptr);
+        }
+
         model_ = sefrboost::fit_regressor(
             static_cast<const double*>(xbuf.ptr),
             n_samples,
@@ -354,7 +421,8 @@ public:
             subsample_,
             split_mode_,
             reg_lambda_,
-            random_state_
+            random_state_,
+            validation.set
         );
         fitted_ = true;
     }
@@ -380,6 +448,8 @@ public:
     }
 
     bool fitted() const { return fitted_; }
+    std::vector<double> validation_loss() const { return model_.validation_loss; }
+    int best_iteration() const { return model_.best_iteration; }
     int n_features_in() const { return n_features_in_; }
     std::size_t model_size_bytes() const {
         if (!fitted_) {
@@ -458,7 +528,18 @@ PYBIND11_MODULE(_sefr_boost_core, m) {
             py::arg("reg_lambda") = 0.0,
             py::arg("random_state") = 0
         )
-        .def("fit", &SEFRBoostClassifierCore::fit, py::arg("X"), py::arg("y_idx"), py::arg("sample_weight") = py::none())
+        .def(
+            "fit",
+            &SEFRBoostClassifierCore::fit,
+            py::arg("X"),
+            py::arg("y_idx"),
+            py::arg("sample_weight") = py::none(),
+            py::arg("X_val") = py::none(),
+            py::arg("y_val_idx") = py::none(),
+            py::arg("early_stopping_rounds") = 0
+        )
+        .def_property_readonly("validation_loss", &SEFRBoostClassifierCore::validation_loss)
+        .def_property_readonly("best_iteration", &SEFRBoostClassifierCore::best_iteration)
         .def("predict", &SEFRBoostClassifierCore::predict, py::arg("X"))
         .def("predict_proba", &SEFRBoostClassifierCore::predict_proba, py::arg("X"))
         .def("decision_function", &SEFRBoostClassifierCore::decision_function, py::arg("X"))
@@ -482,7 +563,18 @@ PYBIND11_MODULE(_sefr_boost_core, m) {
             py::arg("reg_lambda") = 0.0,
             py::arg("random_state") = 0
         )
-        .def("fit", &SEFRBoostRegressorCore::fit, py::arg("X"), py::arg("y"), py::arg("sample_weight") = py::none())
+        .def(
+            "fit",
+            &SEFRBoostRegressorCore::fit,
+            py::arg("X"),
+            py::arg("y"),
+            py::arg("sample_weight") = py::none(),
+            py::arg("X_val") = py::none(),
+            py::arg("y_val") = py::none(),
+            py::arg("early_stopping_rounds") = 0
+        )
+        .def_property_readonly("validation_loss", &SEFRBoostRegressorCore::validation_loss)
+        .def_property_readonly("best_iteration", &SEFRBoostRegressorCore::best_iteration)
         .def("predict", &SEFRBoostRegressorCore::predict, py::arg("X"))
         .def_property_readonly("fitted", &SEFRBoostRegressorCore::fitted)
         .def_property_readonly("n_features_in", &SEFRBoostRegressorCore::n_features_in)
