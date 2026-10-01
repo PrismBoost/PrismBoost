@@ -2,6 +2,22 @@
 
 Notable changes per release. Dates are release dates on PyPI.
 
+## 0.4.1 (2026-10-01)
+
+### Fixed
+
+- The C++ backend crashed on Windows: the seed passed to the C++ core was drawn with NumPy's
+  default integer type, C `long`, which is 32-bit on Windows, so every C++-backed fit raised
+  `ValueError: high is out of bounds for int32`. Seeds are now drawn as 64-bit integers. On Linux
+  and macOS `long` was already 64-bit, so seeds and results there are unchanged.
+
+### Added
+
+- Binary wheels for Linux (x86_64 and aarch64, manylinux and musllinux), macOS (Intel and Apple
+  Silicon) and Windows (x64, and ARM64 for CPython 3.11+), for CPython 3.10 to 3.13. Earlier
+  releases shipped one macOS wheel tagged for macOS 26, so every other platform compiled the C++
+  core from the sdist. Each wheel is tested against its installed copy before release.
+
 ## 0.4.0 (2026-10-01)
 
 ### Added
