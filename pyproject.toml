@@ -71,6 +71,9 @@ build-dir = "build/{wheel_tag}"
 # and the test suite is run against it, so a wheel that builds but cannot import fails the job.
 test-requires = ["pytest>=7.0.0", "pandas>=1.5"]
 test-command = "pytest -q {project}/tests"
+# scikit-learn publishes no Windows ARM64 wheel for CPython 3.10, so neither the tests nor a user
+# could install the dependencies there.
+skip = ["cp310-win_arm64"]
 
 [tool.cibuildwheel.linux]
 archs = ["native"]
