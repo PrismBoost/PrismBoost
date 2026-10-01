@@ -126,3 +126,11 @@ def test_cpp_regressor_smoke():
     pred = reg.predict(X)
     assert pred.shape == (200,)
     assert reg.score(X, y) > 0.5
+
+
+def test_cpp_random_seed_is_platform_independent():
+    from prismboost.prism_boost import _cpp_random_seed
+
+    # Values drawn with a 64-bit `long` on Linux/macOS; Windows must match them rather than
+    # overflow its 32-bit default.
+    assert [_cpp_random_seed(s) for s in (0, 1, 42)] == [2357136044, 1791095845, 1608637542]

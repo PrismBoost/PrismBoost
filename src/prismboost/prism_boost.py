@@ -257,7 +257,9 @@ def _set_validation_results(estimator, losses, best_iteration: int, early_stoppi
 
 def _cpp_random_seed(random_state) -> int:
     rng = check_random_state(random_state)
-    return int(rng.randint(0, np.iinfo(np.uint32).max))
+    # An explicit dtype: the default is C `long`, which is 32-bit on Windows and cannot hold the
+    # uint32 range. int64 draws the same values as the 64-bit `long` on Linux and macOS.
+    return int(rng.randint(0, np.iinfo(np.uint32).max, dtype=np.int64))
 
 
 def _should_use_cpp(use_cpp: bool | None) -> bool:

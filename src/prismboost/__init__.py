@@ -6,7 +6,7 @@ The estimators are :class:`PrismBoostClassifier` and
 available as aliases of the same classes.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 from .sefr import SEFR
 from .prism_boost import (

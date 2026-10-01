@@ -66,6 +66,24 @@ wheel.packages = ["src/prismboost"]
 cmake.source-dir = "cpp"
 build-dir = "build/{wheel_tag}"
 
+[tool.cibuildwheel]
+# Python versions come from `requires-python`. Each wheel is installed into a fresh environment
+# and the test suite is run against it, so a wheel that builds but cannot import fails the job.
+test-requires = ["pytest>=7.0.0", "pandas>=1.5"]
+test-command = "pytest -q {project}/tests"
+# scikit-learn publishes no Windows ARM64 wheel for CPython 3.10, so neither the tests nor a user
+# could install the dependencies there.
+skip = ["cp310-win_arm64"]
+
+[tool.cibuildwheel.linux]
+archs = ["native"]
+
+[tool.cibuildwheel.macos]
+archs = ["native"]
+
+[tool.cibuildwheel.windows]
+archs = ["native"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore"]
