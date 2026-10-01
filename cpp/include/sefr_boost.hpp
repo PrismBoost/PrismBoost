@@ -45,6 +45,10 @@ struct ClassifierModel {
     std::vector<Tree> trees_flat;
     bool multiclass = false;
     int trees_per_stage = 1;
+    // Training-time results, not serialized: the validation loss after each stage, and the number
+    // of stages kept (fewer than requested when early stopping truncated the ensemble).
+    std::vector<double> validation_loss;
+    int best_iteration = 0;
 };
 
 struct RegressorModel {
@@ -52,6 +56,22 @@ struct RegressorModel {
     double learning_rate = 0.1;
     double init_score = 0.0;
     std::vector<Tree> trees;
+    // See ClassifierModel.
+    std::vector<double> validation_loss;
+    int best_iteration = 0;
+};
+
+// Optional validation data scored after every boosting stage. The loss is the training loss:
+// log loss for classifiers (rows with a negative `y_idx` are skipped, e.g. a class unseen in
+// training) and squared error for regressors. With `early_stopping_rounds > 0`, training stops
+// once that many stages pass without a strictly lower loss and the ensemble is truncated to the
+// best stage; with 0 the loss is only recorded.
+struct ValidationSet {
+    const double* X = nullptr;
+    int n_samples = 0;
+    const int64_t* y_idx = nullptr;
+    const double* y = nullptr;
+    int early_stopping_rounds = 0;
 };
 
 // `reg_lambda` is the L2 penalty on leaf weights: it enters the Newton step as
@@ -145,7 +165,8 @@ ClassifierModel fit_classifier(
     double subsample,
     SplitMode split_mode,
     double reg_lambda,
-    uint32_t random_state
+    uint32_t random_state,
+    const ValidationSet& validation = ValidationSet()
 );
 
 RegressorModel fit_regressor(
@@ -162,7 +183,8 @@ RegressorModel fit_regressor(
     double subsample,
     SplitMode split_mode,
     double reg_lambda,
-    uint32_t random_state
+    uint32_t random_state,
+    const ValidationSet& validation = ValidationSet()
 );
 
 std::vector<double> predict_classifier_proba_pos(

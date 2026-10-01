@@ -140,6 +140,121 @@ def _backfill_resolved_params(estimator) -> None:
     estimator.auto_config_ = {}
 
 
+def _check_early_stopping(early_stopping_rounds, eval_set) -> None:
+    if early_stopping_rounds is not None and eval_set is None:
+        raise ValueError("early_stopping_rounds requires eval_set=(X_val, y_val) in fit.")
+
+
+def _validate_eval_set(estimator, eval_set) -> tuple[np.ndarray, np.ndarray] | None:
+    """Validate ``eval_set=(X_val, y_val)`` against the fitted feature layout."""
+    if eval_set is None:
+        return None
+    if not isinstance(eval_set, (tuple, list)) or len(eval_set) != 2:
+        raise ValueError("eval_set must be a tuple (X_val, y_val).")
+    X_val, y_val = eval_set
+    if SKLEARN_V1_6_OR_LATER:
+        X_val = validate_data(
+            estimator,
+            X_val,
+            accept_sparse=False,
+            dtype=np.float64,
+            reset=False,
+            ensure_all_finite=True,
+        )
+    else:
+        X_val = validate_data(
+            estimator,
+            X_val,
+            accept_sparse=False,
+            dtype=np.float64,
+            force_all_finite=True,
+        )
+        if X_val.shape[1] != estimator.n_features_in_:
+            raise ValueError(
+                f"eval_set X has {X_val.shape[1]} features, but the estimator is fitted "
+                f"with {estimator.n_features_in_}."
+            )
+    y_val = np.asarray(y_val)
+    if y_val.ndim == 2 and y_val.shape[1] == 1:
+        y_val = y_val.ravel()
+    if y_val.ndim != 1 or y_val.shape[0] != X_val.shape[0]:
+        raise ValueError("eval_set X and y must have the same number of rows.")
+    return np.ascontiguousarray(X_val, dtype=np.float64), y_val
+
+
+def _encode_eval_labels(classes: np.ndarray, y_val: np.ndarray) -> np.ndarray:
+    """Class index per validation row, ``-1`` for a class not seen in training.
+
+    A bagged fold can miss a rare class that its validation rows still contain. Those rows
+    have no probability column to score, so they are left out of the validation loss.
+    """
+    idx = np.minimum(np.searchsorted(classes, y_val), classes.size - 1)
+    known = classes[idx] == y_val
+    if not np.any(known):
+        raise ValueError("eval_set has no rows with a class seen in training.")
+    return np.where(known, idx, -1).astype(np.int64)
+
+
+class _EarlyStopper:
+    """Validation-loss bookkeeping shared by the Python boosting loops.
+
+    Mirrors ``EarlyStopper`` in the C++ core: ``best`` counts stages, the loss must strictly
+    improve, and training stops ``rounds`` stages after the best one.
+    """
+
+    def __init__(self, rounds: int | None):
+        self.rounds = rounds
+        self.losses: list[float] = []
+        self.best = 0
+        self._best_loss = np.inf
+
+    def update(self, loss: float, stages: int) -> bool:
+        """Record the loss after ``stages`` stages; return ``True`` to stop training."""
+        self.losses.append(float(loss))
+        improved = loss < self._best_loss
+        if improved:
+            self._best_loss = loss
+            self.best = stages
+        return self.rounds is not None and stages - self.best >= self.rounds
+
+    @property
+    def improved(self) -> bool:
+        return self.best == len(self.losses)
+
+    def kept_stages(self, fitted: int) -> int:
+        if self.rounds is None or self.best == 0:
+            return fitted
+        return self.best
+
+
+def _binary_log_loss(F: np.ndarray, y_idx: np.ndarray) -> float:
+    known = y_idx >= 0
+    p = np.clip(1.0 / (1.0 + np.exp(-F[known])), 1e-10, 1.0 - 1e-10)
+    y = y_idx[known]
+    return float(-np.mean(np.where(y == 1, np.log(p), np.log(1.0 - p))))
+
+
+def _multiclass_log_loss(F: np.ndarray, y_idx: np.ndarray) -> float:
+    known = y_idx >= 0
+    Fk = F[known]
+    expF = np.exp(Fk - Fk.max(axis=1, keepdims=True))
+    proba = np.clip(expF / expF.sum(axis=1, keepdims=True), 1e-10, 1.0 - 1e-10)
+    proba = proba / proba.sum(axis=1, keepdims=True)
+    return float(-np.mean(np.log(proba[np.arange(Fk.shape[0]), y_idx[known]])))
+
+
+def _reset_validation_results(estimator) -> None:
+    for name in ("validation_loss_", "best_iteration_"):
+        if hasattr(estimator, name):
+            delattr(estimator, name)
+
+
+def _set_validation_results(estimator, losses, best_iteration: int, early_stopping: bool) -> None:
+    estimator.validation_loss_ = np.asarray(losses, dtype=np.float64)
+    if early_stopping:
+        estimator.best_iteration_ = int(best_iteration)
+
+
 def _cpp_random_seed(random_state) -> int:
     rng = check_random_state(random_state)
     return int(rng.randint(0, np.iinfo(np.uint32).max))
@@ -763,6 +878,12 @@ class PrismBoostClassifier(ClassifierMixin, BaseEstimator):
         installed), training and prediction run in the C++ backend for much faster
         fit/predict. Set ``False`` to force the pure-Python implementation.
 
+    early_stopping_rounds : int or None, default=None
+        Stop training once the log loss on ``eval_set`` (passed to :meth:`fit`) has not
+        improved for this many stages, and keep only the stages up to the best one.
+        ``n_estimators`` is then an upper bound. Requires ``eval_set``. ``None`` trains every
+        stage.
+
     Attributes
     ----------
     auto_config_ : dict
@@ -772,6 +893,15 @@ class PrismBoostClassifier(ClassifierMixin, BaseEstimator):
     n_estimators_, learning_rate_, max_depth_, min_samples_leaf_, \
 min_samples_split_, subsample_, split_mode_
         Values actually used for training, whether explicit or auto-derived.
+
+    validation_loss_ : ndarray of shape (n_stages_fitted,)
+        Log loss on ``eval_set`` after each stage that was fitted. Only set when ``eval_set``
+        is passed to :meth:`fit`.
+
+    best_iteration_ : int
+        Number of stages kept after early stopping. Refitting with
+        ``n_estimators=best_iteration_`` and the same ``random_state`` reproduces the model.
+        Only set when ``early_stopping_rounds`` is used.
 
     Notes
     -----
@@ -799,6 +929,7 @@ min_samples_split_, subsample_, split_mode_
         "second_order": ["boolean"],
         "random_state": ["random_state"],
         "use_cpp": ["boolean", None],
+        "early_stopping_rounds": [Interval(Integral, 1, None, closed="left"), None],
     }
 
     def __init__(
@@ -817,6 +948,7 @@ min_samples_split_, subsample_, split_mode_
         second_order: bool = True,
         random_state=None,
         use_cpp=None,
+        early_stopping_rounds=None,
     ):
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
@@ -831,6 +963,7 @@ min_samples_split_, subsample_, split_mode_
         self.second_order = second_order
         self.random_state = random_state
         self.use_cpp = use_cpp
+        self.early_stopping_rounds = early_stopping_rounds
 
     if SKLEARN_V1_6_OR_LATER:
 
@@ -873,6 +1006,8 @@ min_samples_split_, subsample_, split_mode_
             self.second_order = True  # pickled before the parameter existed
         if not hasattr(self, "reg_lambda"):
             self.reg_lambda = 0.0  # pickled before the parameter existed
+        if not hasattr(self, "early_stopping_rounds"):
+            self.early_stopping_rounds = None  # pickled before the parameter existed
         _backfill_resolved_params(self)
 
     def save(self, path):
@@ -887,7 +1022,31 @@ min_samples_split_, subsample_, split_mode_
         return est
 
     @_fit_context(prefer_skip_nested_validation=True)
-    def fit(self, X, y, sample_weight=None):
+    def fit(self, X, y, sample_weight=None, eval_set=None):
+        """Fit the booster.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+
+        y : array-like of shape (n_samples,)
+            Class labels.
+
+        sample_weight : array-like of shape (n_samples,), default=None
+            Per-sample weights.
+
+        eval_set : tuple (X_val, y_val), default=None
+            Validation data scored by log loss after every stage, recorded in
+            ``validation_loss_`` and used by ``early_stopping_rounds``. Rows whose class does
+            not occur in ``y`` are left out of the loss.
+
+        Returns
+        -------
+        self : PrismBoostClassifier
+        """
+        _check_early_stopping(self.early_stopping_rounds, eval_set)
+        _reset_validation_results(self)
         if SKLEARN_V1_6_OR_LATER:
             X, y = validate_data(
                 self,
@@ -926,6 +1085,10 @@ min_samples_split_, subsample_, split_mode_
         n_samples = X.shape[0]
         y_original = np.asarray(y)
         _resolve_boosting_params(self, n_samples, self.n_features_in_, AUTO_PARAM_NAMES)
+
+        validation = _validate_eval_set(self, eval_set)
+        if validation is not None:
+            validation = (validation[0], _encode_eval_labels(self.classes_, validation[1]))
 
         if sample_weight is not None:
             sw = _check_sample_weight(sample_weight, X, dtype=np.float64)
@@ -979,25 +1142,48 @@ min_samples_split_, subsample_, split_mode_
                 random_state=_cpp_random_seed(self.random_state),
             )
             X_c = np.ascontiguousarray(X, dtype=np.float64)
+            val_kwargs = {}
+            if validation is not None:
+                val_kwargs = {
+                    "X_val": validation[0],
+                    "y_val_idx": validation[1],
+                    "early_stopping_rounds": self.early_stopping_rounds or 0,
+                }
             self._cpp_core_.fit(
                 X_c,
                 y_idx.astype(np.int64),
                 sample_weight=ew,
+                **val_kwargs,
             )
             self.trees_ = []
+            if validation is not None:
+                _set_validation_results(
+                    self,
+                    self._cpp_core_.validation_loss,
+                    self._cpp_core_.best_iteration,
+                    self.early_stopping_rounds is not None,
+                )
             return self
 
         rng = check_random_state(self.random_state)
+        stopper = _EarlyStopper(self.early_stopping_rounds) if validation is not None else None
 
         # Keep the binary path bit-exact (single tree per stage, scalar log-odds);
         # route to the K-tree softmax loop only when K > 2.
         if self.n_classes_ == 2:
-            self._fit_binary(X, y_idx, y_original, sw, rng)
+            self._fit_binary(X, y_idx, y_original, sw, rng, validation, stopper)
         else:
-            self._fit_multiclass(X, y_idx, y_original, sw, rng)
+            self._fit_multiclass(X, y_idx, y_original, sw, rng, validation, stopper)
+        if stopper is not None:
+            _set_validation_results(
+                self,
+                stopper.losses,
+                len(self.trees_),
+                self.early_stopping_rounds is not None,
+            )
         return self
 
-    def _fit_binary(self, X, y_idx, y_original, sw, rng):
+    def _fit_binary(self, X, y_idx, y_original, sw, rng, validation=None, stopper=None):
         n_samples = X.shape[0]
         y_binary = y_idx.astype(np.float64)
 
@@ -1013,10 +1199,14 @@ min_samples_split_, subsample_, split_mode_
         pos_rate = float(np.clip(np.dot(ew, y_binary) / w_sum, 1e-10, 1.0 - 1e-10))
         self.init_score_ = np.log(pos_rate / (1.0 - pos_rate))
         F = np.full(n_samples, self.init_score_, dtype=np.float64)
+        if validation is not None:
+            X_val, y_val_idx = validation
+            F_val = np.full(X_val.shape[0], self.init_score_, dtype=np.float64)
+        F_best = F
 
         self.trees_: list[_SEFRTree] = []
 
-        for _ in range(self.n_estimators_):
+        for stage in range(self.n_estimators_):
             p = 1.0 / (1.0 + np.exp(-F))
             p = np.clip(p, 1e-10, 1.0 - 1e-10)
             residuals = y_binary - p
@@ -1048,9 +1238,22 @@ min_samples_split_, subsample_, split_mode_
             self.trees_.append(tree)
             F = F + self.learning_rate_ * tree.predict(X)
 
+            if validation is not None:
+                F_val = F_val + self.learning_rate_ * tree.predict(X_val)
+                stop = stopper.update(_binary_log_loss(F_val, y_val_idx), stage + 1)
+                if stopper.improved:
+                    F_best = F
+                if stop:
+                    break
+
+        if stopper is not None:
+            kept = stopper.kept_stages(len(self.trees_))
+            if kept < len(self.trees_):
+                del self.trees_[kept:]
+                F = F_best
         self.F_train_ = F
 
-    def _fit_multiclass(self, X, y_idx, y_original, sw, rng):
+    def _fit_multiclass(self, X, y_idx, y_original, sw, rng, validation=None, stopper=None):
         n_samples = X.shape[0]
         K = self.n_classes_
         # Friedman's multinomial Newton step scales the per-class leaf update by
@@ -1075,11 +1278,15 @@ min_samples_split_, subsample_, split_mode_
         prior = np.clip(prior, 1e-10, 1.0 - 1e-10)
         self.init_score_ = np.log(prior)  # shape (K,)
         F = np.tile(self.init_score_, (n_samples, 1))  # (n, K)
+        if validation is not None:
+            X_val, y_val_idx = validation
+            F_val = np.tile(self.init_score_, (X_val.shape[0], 1))
+        F_best = F.copy()
 
         # One list of K trees per boosting stage.
         self.trees_: list[list[_SEFRTree]] = []
 
-        for _ in range(self.n_estimators_):
+        for stage in range(self.n_estimators_):
             # Softmax with max-subtraction for numerical stability.
             Fmax = F.max(axis=1, keepdims=True)
             expF = np.exp(F - Fmax)
@@ -1111,8 +1318,22 @@ min_samples_split_, subsample_, split_mode_
                 )
                 stage_trees.append(tree)
                 F[:, k] += self.learning_rate_ * self.mc_leaf_scale_ * tree.predict(X)
+                if validation is not None:
+                    F_val[:, k] += self.learning_rate_ * self.mc_leaf_scale_ * tree.predict(X_val)
             self.trees_.append(stage_trees)
 
+            if validation is not None:
+                stop = stopper.update(_multiclass_log_loss(F_val, y_val_idx), stage + 1)
+                if stopper.improved:
+                    F_best = F.copy()
+                if stop:
+                    break
+
+        if stopper is not None:
+            kept = stopper.kept_stages(len(self.trees_))
+            if kept < len(self.trees_):
+                del self.trees_[kept:]
+                F = F_best
         self.F_train_ = F
 
     def decision_function(self, X):
@@ -1192,6 +1413,9 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
     training set shape by :func:`auto_boosting_config`; see ``auto_config_`` for what was
     derived. ``reg_lambda`` (default 0.0) is the L2 penalty on leaf weights, entering the leaf
     as ``sum(w r) / (sum(w) + reg_lambda)`` and the split gain as ``G^2 / (H + reg_lambda)``.
+    ``early_stopping_rounds`` works as in the classifier, with mean squared error on
+    ``eval_set`` as the validation loss; ``validation_loss_`` and ``best_iteration_`` are set
+    the same way.
 
     Notes
     -----
@@ -1209,6 +1433,7 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
         "reg_lambda": [Interval(Real, 0.0, None, closed="left")],
         "random_state": ["random_state"],
         "use_cpp": ["boolean", None],
+        "early_stopping_rounds": [Interval(Integral, 1, None, closed="left"), None],
     }
 
     def __init__(
@@ -1224,6 +1449,7 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
         reg_lambda: float = 0.0,
         random_state=None,
         use_cpp=None,
+        early_stopping_rounds=None,
     ):
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
@@ -1235,6 +1461,7 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
         self.reg_lambda = reg_lambda
         self.random_state = random_state
         self.use_cpp = use_cpp
+        self.early_stopping_rounds = early_stopping_rounds
 
     if SKLEARN_V1_6_OR_LATER:
 
@@ -1276,6 +1503,8 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
             )
         else:
             self.__dict__.update(state)
+        if not hasattr(self, "early_stopping_rounds"):
+            self.early_stopping_rounds = None  # pickled before the parameter existed
         _backfill_resolved_params(self)
 
     def save(self, path):
@@ -1290,7 +1519,30 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
         return est
 
     @_fit_context(prefer_skip_nested_validation=True)
-    def fit(self, X, y, sample_weight=None):
+    def fit(self, X, y, sample_weight=None, eval_set=None):
+        """Fit the booster.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+
+        y : array-like of shape (n_samples,)
+            Target values.
+
+        sample_weight : array-like of shape (n_samples,), default=None
+            Per-sample weights.
+
+        eval_set : tuple (X_val, y_val), default=None
+            Validation data scored by mean squared error after every stage, recorded in
+            ``validation_loss_`` and used by ``early_stopping_rounds``.
+
+        Returns
+        -------
+        self : PrismBoostRegressor
+        """
+        _check_early_stopping(self.early_stopping_rounds, eval_set)
+        _reset_validation_results(self)
         if SKLEARN_V1_6_OR_LATER:
             X, y = validate_data(
                 self,
@@ -1328,6 +1580,10 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
             raise ValueError("X and y must have the same number of samples.")
         _resolve_boosting_params(self, n_samples, self.n_features_in_, AUTO_PARAM_NAMES)
 
+        validation = _validate_eval_set(self, eval_set)
+        if validation is not None:
+            validation = (validation[0], np.asarray(validation[1], dtype=np.float64))
+
         if sample_weight is not None:
             sw = _check_sample_weight(sample_weight, X, dtype=np.float64)
         else:
@@ -1348,18 +1604,38 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
                 random_state=_cpp_random_seed(self.random_state),
             )
             X_c = np.ascontiguousarray(X, dtype=np.float64)
-            self._cpp_core_.fit(X_c, y, sample_weight=sw)
+            val_kwargs = {}
+            if validation is not None:
+                val_kwargs = {
+                    "X_val": validation[0],
+                    "y_val": validation[1],
+                    "early_stopping_rounds": self.early_stopping_rounds or 0,
+                }
+            self._cpp_core_.fit(X_c, y, sample_weight=sw, **val_kwargs)
             self.trees_ = []
+            if validation is not None:
+                _set_validation_results(
+                    self,
+                    self._cpp_core_.validation_loss,
+                    self._cpp_core_.best_iteration,
+                    self.early_stopping_rounds is not None,
+                )
             return self
 
         w_sum = float(sw.sum()) + 1e-15
         self.init_score_ = float(np.dot(sw, y) / w_sum)
         F = np.full(n_samples, self.init_score_, dtype=np.float64)
+        stopper = None
+        if validation is not None:
+            X_val, y_val = validation
+            F_val = np.full(X_val.shape[0], self.init_score_, dtype=np.float64)
+            stopper = _EarlyStopper(self.early_stopping_rounds)
+        F_best = F
 
         rng = check_random_state(self.random_state)
         self.trees_: list[_SEFRTree] = []
 
-        for _ in range(self.n_estimators_):
+        for stage in range(self.n_estimators_):
             residuals = y - F
 
             if self.subsample_ < 1.0:
@@ -1388,6 +1664,22 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
             self.trees_.append(tree)
             F = F + self.learning_rate_ * tree.predict(X)
 
+            if stopper is not None:
+                F_val = F_val + self.learning_rate_ * tree.predict(X_val)
+                stop = stopper.update(float(np.mean((y_val - F_val) ** 2)), stage + 1)
+                if stopper.improved:
+                    F_best = F
+                if stop:
+                    break
+
+        if stopper is not None:
+            kept = stopper.kept_stages(len(self.trees_))
+            if kept < len(self.trees_):
+                del self.trees_[kept:]
+                F = F_best
+            _set_validation_results(
+                self, stopper.losses, len(self.trees_), self.early_stopping_rounds is not None
+            )
         self.F_train_ = F
         return self
 

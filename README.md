@@ -67,6 +67,29 @@ so the unregularized Newton step is large and the accumulated scores can saturat
 sensitive to this than log loss is, which is why the PMLB study above, scored on macro-F1 and
 ROC-AUC, did not surface it.
 
+Measured directly: over 33 PMLB datasets with Optuna tuning, `reg_lambda` is neutral on ROC-AUC
+(13 wins, 16 losses, median difference 0.0000). It acts on calibrated probabilities, so tune it
+when you score with a proper scoring rule such as log loss, or when classes are imbalanced, and
+expect little from it on ranking metrics.
+
+## Early stopping (`eval_set`, `early_stopping_rounds`)
+
+Pass validation data to `fit` and set `early_stopping_rounds` to stop once the validation loss (log
+loss for classifiers, squared error for the regressor) has not improved for that many stages. The
+ensemble is truncated to the best stage, so `n_estimators` becomes an upper bound:
+
+```python
+clf = PrismBoostClassifier(n_estimators=1600, early_stopping_rounds=50)
+clf.fit(X_train, y_train, eval_set=(X_val, y_val))
+clf.best_iteration_    # stages kept
+clf.validation_loss_   # validation loss after each fitted stage
+```
+
+Refitting with `n_estimators=clf.best_iteration_` and the same `random_state` reproduces the
+early-stopped model exactly. Passing `eval_set` without `early_stopping_rounds` only records
+`validation_loss_`. On a 4,000-row binary problem with a 1,600-stage cap, early stopping kept 134
+stages, cut fit time from 27 s to 3 s, and lowered test log loss from 0.418 to 0.328.
+
 ## Why oblique boosting?
 
 Axis-aligned GBDTs approximate curved boundaries with staircases. PrismBoost fits **linear (oblique) splits**, so decision surfaces on non-linear problems are typically smoother.
@@ -88,6 +111,12 @@ Axis-aligned GBDTs approximate curved boundaries with staircases. PrismBoost fit
 </p>
 
 ## Benchmark highlights (PMLB)
+
+> [!NOTE]
+> These numbers were produced before 0.3.0 and understate PrismBoost. The C++ core was
+> compiled with `-ffast-math` at the time, which broke the split search (see the 0.3.0
+> release notes); removing it improved ROC-AUC on 22 of 30 re-run datasets, by up to
+> 0.02. The table below is the 0.2.0 result and a full re-run is pending.
 
 Evaluated on **121** Penn Machine Learning Benchmark classification datasets against strong baselines (CatBoost, LightGBM, LightGBM-linear, XGBoost, SPORF, Random Forest, Logistic Regression). Hyperparameters are tuned with Optuna; scores are repeated stratified CV.
 
