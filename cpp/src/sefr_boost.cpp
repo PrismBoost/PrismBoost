@@ -1,6 +1,7 @@
 #include "sefr_boost.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <numeric>
 #include <stdexcept>
@@ -20,7 +21,10 @@ double clip(double x, double lo, double hi) {
 // means no stage has produced a finite loss yet.
 class EarlyStopper {
 public:
-    explicit EarlyStopper(int rounds) : rounds_(rounds) {}
+    EarlyStopper(int rounds, double budget_seconds)
+        : rounds_(rounds),
+          budget_(budget_seconds),
+          start_(std::chrono::steady_clock::now()) {}
 
     bool update(double loss, int stages) {
         losses_.push_back(loss);
@@ -28,7 +32,16 @@ public:
             best_loss_ = loss;
             best_ = stages;
         }
-        return rounds_ > 0 && stages - best_ >= rounds_;
+        return (rounds_ > 0 && stages - best_ >= rounds_) || out_of_time();
+    }
+
+    // For a fit with no validation data: the budget is then the only reason to stop early.
+    bool out_of_time() const {
+        if (budget_ <= 0.0) {
+            return false;
+        }
+        const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - start_;
+        return elapsed.count() >= budget_;
     }
 
     // Truncate `trees` to the best stage when early stopping is on, record the losses on the
@@ -45,6 +58,8 @@ public:
 
 private:
     int rounds_;
+    double budget_;
+    std::chrono::steady_clock::time_point start_;
     int best_ = 0;
     double best_loss_ = std::numeric_limits<double>::infinity();
     std::vector<double> losses_;
@@ -776,11 +791,12 @@ ClassifierModel fit_classifier(
     SplitMode split_mode,
     double reg_lambda,
     uint32_t random_state,
-    const ValidationSet& validation
+    const ValidationSet& validation,
+    const TimeBudget& time_budget
 ) {
     check_validation_classes(validation, n_classes);
     const bool validating = has_validation(validation);
-    EarlyStopper stopper(validation.early_stopping_rounds);
+    EarlyStopper stopper(validation.early_stopping_rounds, time_budget.seconds);
 
     ClassifierModel model;
     model.n_features = n_features;
@@ -885,6 +901,9 @@ ClassifierModel fit_classifier(
                 if (stopper.update(binary_log_loss(F_val, validation.y_idx), stage + 1)) {
                     break;
                 }
+            }
+            if (!validating && stopper.out_of_time()) {
+                break;
             }
         }
         model.best_iteration = stopper.finish(model.trees_flat, 1, model.validation_loss);
@@ -1016,6 +1035,9 @@ ClassifierModel fit_classifier(
             stopper.update(multiclass_log_loss(F_val, n_classes, validation.y_idx), stage + 1)) {
             break;
         }
+        if (!validating && stopper.out_of_time()) {
+            break;
+        }
     }
 
     model.best_iteration = stopper.finish(model.trees_flat, n_classes, model.validation_loss);
@@ -1037,10 +1059,11 @@ RegressorModel fit_regressor(
     SplitMode split_mode,
     double reg_lambda,
     uint32_t random_state,
-    const ValidationSet& validation
+    const ValidationSet& validation,
+    const TimeBudget& time_budget
 ) {
     const bool validating = has_validation(validation);
-    EarlyStopper stopper(validation.early_stopping_rounds);
+    EarlyStopper stopper(validation.early_stopping_rounds, time_budget.seconds);
 
     RegressorModel model;
     model.n_features = n_features;
@@ -1113,6 +1136,9 @@ RegressorModel fit_regressor(
             if (stopper.update(squared_error(F_val, validation.y), stage + 1)) {
                 break;
             }
+        }
+        if (!validating && stopper.out_of_time()) {
+            break;
         }
     }
 

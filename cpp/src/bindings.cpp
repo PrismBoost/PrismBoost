@@ -107,7 +107,8 @@ public:
         py::object sample_weight = py::none(),
         py::object X_val = py::none(),
         py::object y_val_idx = py::none(),
-        int early_stopping_rounds = 0
+        int early_stopping_rounds = 0,
+        double time_limit = 0.0
     ) {
         X = as_2d_c_contiguous(X, "X");
         y_idx = as_1d_int64(y_idx, "y_idx");
@@ -168,7 +169,8 @@ public:
             split_mode_,
             reg_lambda_,
             random_state_,
-            validation.set
+            validation.set,
+            sefrboost::TimeBudget{time_limit}
         );
         fitted_ = true;
     }
@@ -369,7 +371,8 @@ public:
         py::object sample_weight = py::none(),
         py::object X_val = py::none(),
         py::object y_val = py::none(),
-        int early_stopping_rounds = 0
+        int early_stopping_rounds = 0,
+        double time_limit = 0.0
     ) {
         X = as_2d_c_contiguous(X, "X");
         y = as_1d(y, "y");
@@ -422,7 +425,8 @@ public:
             split_mode_,
             reg_lambda_,
             random_state_,
-            validation.set
+            validation.set,
+            sefrboost::TimeBudget{time_limit}
         );
         fitted_ = true;
     }
@@ -536,7 +540,8 @@ PYBIND11_MODULE(_sefr_boost_core, m) {
             py::arg("sample_weight") = py::none(),
             py::arg("X_val") = py::none(),
             py::arg("y_val_idx") = py::none(),
-            py::arg("early_stopping_rounds") = 0
+            py::arg("early_stopping_rounds") = 0,
+            py::arg("time_limit") = 0.0
         )
         .def_property_readonly("validation_loss", &SEFRBoostClassifierCore::validation_loss)
         .def_property_readonly("best_iteration", &SEFRBoostClassifierCore::best_iteration)
@@ -571,7 +576,8 @@ PYBIND11_MODULE(_sefr_boost_core, m) {
             py::arg("sample_weight") = py::none(),
             py::arg("X_val") = py::none(),
             py::arg("y_val") = py::none(),
-            py::arg("early_stopping_rounds") = 0
+            py::arg("early_stopping_rounds") = 0,
+            py::arg("time_limit") = 0.0
         )
         .def_property_readonly("validation_loss", &SEFRBoostRegressorCore::validation_loss)
         .def_property_readonly("best_iteration", &SEFRBoostRegressorCore::best_iteration)

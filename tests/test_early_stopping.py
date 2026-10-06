@@ -2,8 +2,12 @@
 
 import pickle
 
+import time
+
 import numpy as np
 import pytest
+from sklearn.model_selection import train_test_split
+from sklearn.utils._testing import assert_allclose
 from sklearn.datasets import make_classification, make_regression
 from sklearn.metrics import log_loss, mean_squared_error
 
@@ -174,3 +178,75 @@ def test_old_pickle_without_parameter_defaults_to_none():
     restored.__setstate__(state)
 
     assert restored.early_stopping_rounds is None
+
+
+# --- wall-clock budget (fit(time_limit=...)) -----------------------------------------
+
+
+def _slow_task(n_samples=4000, n_features=30):
+    X, y = make_classification(n_samples=n_samples, n_features=n_features, random_state=0)
+    return X, y
+
+
+@pytest.mark.parametrize("use_cpp", [True, False])
+def test_time_limit_stops_the_boosting_loop(use_cpp):
+    """A budget well below what the cap needs must cut the loop short, not just warn."""
+    X, y = _slow_task()
+    budget = 2.0
+    model = PrismBoostClassifier(
+        n_estimators=4000, learning_rate=0.02, max_depth=6, split_mode="hybrid",
+        random_state=0, use_cpp=use_cpp,
+    )
+    start = time.perf_counter()
+    model.fit(X, y, time_limit=budget)
+    elapsed = time.perf_counter() - start
+    # Checked between stages, so one stage of overshoot is expected; an unbudgeted fit of this
+    # shape takes minutes, so a loose bound still distinguishes stopping from not stopping.
+    assert elapsed < budget * 3
+    assert model.predict(X).shape == y.shape
+
+
+def test_time_limit_keeps_the_stages_it_fitted():
+    X, y = _slow_task()
+    model = PrismBoostClassifier(
+        n_estimators=4000, learning_rate=0.02, max_depth=6, split_mode="hybrid", random_state=0
+    ).fit(X, y, time_limit=2.0)
+    kept = model._cpp_core_.best_iteration
+    assert 0 < kept < 4000
+    # The kept count is a usable model, not an empty one.
+    assert model.score(X, y) > 0.6
+
+
+def test_time_limit_composes_with_early_stopping():
+    X, y = _slow_task()
+    Xtr, Xval, ytr, yval = train_test_split(X, y, test_size=0.2, random_state=0)
+    model = PrismBoostClassifier(
+        n_estimators=4000, learning_rate=0.02, max_depth=6, split_mode="hybrid",
+        random_state=0, early_stopping_rounds=50,
+    ).fit(Xtr, ytr, eval_set=(Xval, yval), time_limit=3.0)
+    assert 0 < model.best_iteration_ <= len(model.validation_loss_)
+
+
+def test_time_limit_none_is_unbounded():
+    """The default must not change behaviour: same model with and without the argument."""
+    X, y = make_classification(n_samples=300, n_features=10, random_state=0)
+    a = PrismBoostClassifier(n_estimators=20, random_state=0).fit(X, y)
+    b = PrismBoostClassifier(n_estimators=20, random_state=0).fit(X, y, time_limit=None)
+    assert_allclose(a.predict_proba(X), b.predict_proba(X))
+
+
+@pytest.mark.parametrize("bad", [0, -1.0])
+def test_time_limit_rejects_non_positive(bad):
+    X, y = make_classification(n_samples=200, n_features=8, random_state=0)
+    with pytest.raises(ValueError, match="time_limit"):
+        PrismBoostClassifier(n_estimators=5, random_state=0).fit(X, y, time_limit=bad)
+
+
+def test_regressor_honours_time_limit():
+    X, y = make_regression(n_samples=4000, n_features=30, random_state=0)
+    start = time.perf_counter()
+    model = PrismBoostRegressor(
+        n_estimators=4000, learning_rate=0.02, max_depth=6, split_mode="hybrid", random_state=0
+    ).fit(X, y, time_limit=2.0)
+    assert time.perf_counter() - start < 6.0
+    assert model.predict(X).shape == y.shape

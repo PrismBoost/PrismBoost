@@ -2,6 +2,29 @@
 
 Notable changes per release. Dates are release dates on PyPI.
 
+## 0.5.0 (2026-10-06)
+
+### Added
+
+- Wall-clock budget: `fit(..., time_limit=seconds)`. The boosting loop checks the elapsed time
+  after each stage and stops, keeping the stages fitted so far, in the C++ core and the NumPy
+  backend, for the classifier and the regressor. It composes with early stopping, ending at
+  whichever comes first and keeping the best stage. On a 8,000 x 40 table with a 4,000-stage cap,
+  an unbudgeted fit took 326 s against 3.1 s with `time_limit=3`.
+
+  `time_limit` is a `fit` argument rather than a constructor parameter: it describes one call's
+  budget, not the model, so it stays out of `get_params` and out of `clone`. The check happens
+  between stages, so one stage on a very large table can still overshoot the budget; this bounds
+  the loop rather than guaranteeing a deadline.
+
+  Asked for by the TabArena maintainers (autogluon/tabarena#629), where every configuration gets
+  a one-hour budget and 16 fits had run past it, the longest at 7,618 s.
+
+### Removed from the known gaps
+
+- The 0.4.0 entry listed the absence of a wall-clock budget as a known gap. This closes it. The
+  fixed stopping criterion (log loss for classifiers, squared error for the regressor) remains.
+
 ## 0.4.1 (2026-10-01)
 
 ### Fixed

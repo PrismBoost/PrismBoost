@@ -90,6 +90,24 @@ early-stopped model exactly. Passing `eval_set` without `early_stopping_rounds` 
 `validation_loss_`. On a 4,000-row binary problem with a 1,600-stage cap, early stopping kept 134
 stages, cut fit time from 27 s to 3 s, and lowered test log loss from 0.418 to 0.328.
 
+## Time budget (`fit(time_limit=...)`)
+
+`fit` takes an optional wall-clock budget in seconds. The boosting loop checks the elapsed time
+after each stage and stops, keeping the stages fitted so far, so a caller with a deadline gets a
+usable model instead of an overrun:
+
+```python
+clf = PrismBoostClassifier(n_estimators=4000, split_mode="hybrid", learning_rate=0.02)
+clf.fit(X_train, y_train, time_limit=60)        # seconds
+```
+
+It composes with early stopping: pass `eval_set` as well and the fit ends at whichever comes
+first, keeping the best stage. On a 8,000 x 40 table with a 4,000-stage cap, an unbudgeted fit
+took 326 s; the same fit with `time_limit=3` took 3.1 s and kept 38 stages.
+
+Checked between stages, so a single stage on a very large table can still overshoot: this bounds
+the loop rather than guaranteeing a hard deadline. `None` (the default) means no budget.
+
 ## Why oblique boosting?
 
 Axis-aligned GBDTs approximate curved boundaries with staircases. PrismBoost fits **linear (oblique) splits**, so decision surfaces on non-linear problems are typically smoother.

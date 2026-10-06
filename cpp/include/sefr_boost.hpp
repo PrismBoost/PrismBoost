@@ -74,6 +74,15 @@ struct ValidationSet {
     int early_stopping_rounds = 0;
 };
 
+// Wall-clock budget for one fit, in seconds. `<= 0` means no budget. The stage loop checks the
+// elapsed time after each completed stage and stops, keeping the stages fitted so far, so a
+// caller with a hard deadline (a benchmark harness, a serving job) gets a usable model instead of
+// an overrun. Checked between stages only: a single stage on a very large table can still exceed
+// the budget, so this bounds the loop rather than guaranteeing a deadline.
+struct TimeBudget {
+    double seconds = 0.0;
+};
+
 // `reg_lambda` is the L2 penalty on leaf weights: it enters the Newton step as
 // `sum(w r) / (sum(w h) + lambda)` and the split gain as `G^2 / (H + lambda)`, the way XGBoost's
 // `reg_lambda` does. At 0.0 every formula reduces to the unregularized one.
@@ -166,7 +175,8 @@ ClassifierModel fit_classifier(
     SplitMode split_mode,
     double reg_lambda,
     uint32_t random_state,
-    const ValidationSet& validation = ValidationSet()
+    const ValidationSet& validation = ValidationSet(),
+    const TimeBudget& time_budget = TimeBudget()
 );
 
 RegressorModel fit_regressor(
@@ -184,7 +194,8 @@ RegressorModel fit_regressor(
     SplitMode split_mode,
     double reg_lambda,
     uint32_t random_state,
-    const ValidationSet& validation = ValidationSet()
+    const ValidationSet& validation = ValidationSet(),
+    const TimeBudget& time_budget = TimeBudget()
 );
 
 std::vector<double> predict_classifier_proba_pos(

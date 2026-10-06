@@ -7,6 +7,7 @@ kept as aliases for the names used before the project was renamed.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from numbers import Integral, Real
 from typing import Optional
@@ -140,6 +141,16 @@ def _backfill_resolved_params(estimator) -> None:
     estimator.auto_config_ = {}
 
 
+def _check_time_limit(time_limit):
+    """Validate ``fit(time_limit=...)``: seconds, or None for no budget."""
+    if time_limit is None:
+        return 0.0
+    value = float(time_limit)
+    if value <= 0.0:
+        raise ValueError(f"time_limit must be positive seconds or None, got {time_limit!r}.")
+    return value
+
+
 def _check_early_stopping(early_stopping_rounds, eval_set) -> None:
     if early_stopping_rounds is not None and eval_set is None:
         raise ValueError("early_stopping_rounds requires eval_set=(X_val, y_val) in fit.")
@@ -202,11 +213,17 @@ class _EarlyStopper:
     improve, and training stops ``rounds`` stages after the best one.
     """
 
-    def __init__(self, rounds: int | None):
+    def __init__(self, rounds: int | None, budget_seconds: float = 0.0):
         self.rounds = rounds
+        self.budget = budget_seconds
+        self._start = time.perf_counter()
         self.losses: list[float] = []
         self.best = 0
         self._best_loss = np.inf
+
+    def out_of_time(self) -> bool:
+        """Whether this fit's wall-clock budget is spent (checked between stages)."""
+        return self.budget > 0.0 and time.perf_counter() - self._start >= self.budget
 
     def update(self, loss: float, stages: int) -> bool:
         """Record the loss after ``stages`` stages; return ``True`` to stop training."""
@@ -215,7 +232,8 @@ class _EarlyStopper:
         if improved:
             self._best_loss = loss
             self.best = stages
-        return self.rounds is not None and stages - self.best >= self.rounds
+        patience_done = self.rounds is not None and stages - self.best >= self.rounds
+        return patience_done or self.out_of_time()
 
     @property
     def improved(self) -> bool:
@@ -1024,7 +1042,7 @@ min_samples_split_, subsample_, split_mode_
         return est
 
     @_fit_context(prefer_skip_nested_validation=True)
-    def fit(self, X, y, sample_weight=None, eval_set=None):
+    def fit(self, X, y, sample_weight=None, eval_set=None, time_limit=None):
         """Fit the booster.
 
         Parameters
@@ -1043,11 +1061,19 @@ min_samples_split_, subsample_, split_mode_
             ``validation_loss_`` and used by ``early_stopping_rounds``. Rows whose class does
             not occur in ``y`` are left out of the loss.
 
+        time_limit : float or None, default=None
+            Wall-clock budget for this fit, in seconds. The boosting loop checks the elapsed
+            time after each stage and stops, keeping the stages fitted so far; with ``eval_set``
+            the fit ends at whichever comes first and keeps the best stage. Checked between
+            stages, so a single stage on a very large table can still overshoot. ``None`` means
+            no budget.
+
         Returns
         -------
         self : PrismBoostClassifier
         """
         _check_early_stopping(self.early_stopping_rounds, eval_set)
+        budget = _check_time_limit(time_limit)
         _reset_validation_results(self)
         if SKLEARN_V1_6_OR_LATER:
             X, y = validate_data(
@@ -1144,13 +1170,15 @@ min_samples_split_, subsample_, split_mode_
                 random_state=_cpp_random_seed(self.random_state),
             )
             X_c = np.ascontiguousarray(X, dtype=np.float64)
-            val_kwargs = {}
+            val_kwargs = {"time_limit": budget}
             if validation is not None:
-                val_kwargs = {
-                    "X_val": validation[0],
-                    "y_val_idx": validation[1],
-                    "early_stopping_rounds": self.early_stopping_rounds or 0,
-                }
+                val_kwargs.update(
+                    {
+                        "X_val": validation[0],
+                        "y_val_idx": validation[1],
+                        "early_stopping_rounds": self.early_stopping_rounds or 0,
+                    }
+                )
             self._cpp_core_.fit(
                 X_c,
                 y_idx.astype(np.int64),
@@ -1168,7 +1196,11 @@ min_samples_split_, subsample_, split_mode_
             return self
 
         rng = check_random_state(self.random_state)
-        stopper = _EarlyStopper(self.early_stopping_rounds) if validation is not None else None
+        stopper = (
+            _EarlyStopper(self.early_stopping_rounds, budget)
+            if validation is not None or budget > 0.0
+            else None
+        )
 
         # Keep the binary path bit-exact (single tree per stage, scalar log-odds);
         # route to the K-tree softmax loop only when K > 2.
@@ -1240,7 +1272,10 @@ min_samples_split_, subsample_, split_mode_
             self.trees_.append(tree)
             F = F + self.learning_rate_ * tree.predict(X)
 
-            if validation is not None:
+            if validation is None:
+                if stopper is not None and stopper.out_of_time():
+                    break
+            else:
                 F_val = F_val + self.learning_rate_ * tree.predict(X_val)
                 stop = stopper.update(_binary_log_loss(F_val, y_val_idx), stage + 1)
                 if stopper.improved:
@@ -1324,7 +1359,10 @@ min_samples_split_, subsample_, split_mode_
                     F_val[:, k] += self.learning_rate_ * self.mc_leaf_scale_ * tree.predict(X_val)
             self.trees_.append(stage_trees)
 
-            if validation is not None:
+            if validation is None:
+                if stopper is not None and stopper.out_of_time():
+                    break
+            else:
                 stop = stopper.update(_multiclass_log_loss(F_val, y_val_idx), stage + 1)
                 if stopper.improved:
                     F_best = F.copy()
@@ -1521,7 +1559,7 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
         return est
 
     @_fit_context(prefer_skip_nested_validation=True)
-    def fit(self, X, y, sample_weight=None, eval_set=None):
+    def fit(self, X, y, sample_weight=None, eval_set=None, time_limit=None):
         """Fit the booster.
 
         Parameters
@@ -1539,11 +1577,19 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
             Validation data scored by mean squared error after every stage, recorded in
             ``validation_loss_`` and used by ``early_stopping_rounds``.
 
+        time_limit : float or None, default=None
+            Wall-clock budget for this fit, in seconds. The boosting loop checks the elapsed
+            time after each stage and stops, keeping the stages fitted so far; with ``eval_set``
+            the fit ends at whichever comes first and keeps the best stage. Checked between
+            stages, so a single stage on a very large table can still overshoot. ``None`` means
+            no budget.
+
         Returns
         -------
         self : PrismBoostRegressor
         """
         _check_early_stopping(self.early_stopping_rounds, eval_set)
+        budget = _check_time_limit(time_limit)
         _reset_validation_results(self)
         if SKLEARN_V1_6_OR_LATER:
             X, y = validate_data(
@@ -1606,13 +1652,15 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
                 random_state=_cpp_random_seed(self.random_state),
             )
             X_c = np.ascontiguousarray(X, dtype=np.float64)
-            val_kwargs = {}
+            val_kwargs = {"time_limit": budget}
             if validation is not None:
-                val_kwargs = {
-                    "X_val": validation[0],
-                    "y_val": validation[1],
-                    "early_stopping_rounds": self.early_stopping_rounds or 0,
-                }
+                val_kwargs.update(
+                    {
+                        "X_val": validation[0],
+                        "y_val": validation[1],
+                        "early_stopping_rounds": self.early_stopping_rounds or 0,
+                    }
+                )
             self._cpp_core_.fit(X_c, y, sample_weight=sw, **val_kwargs)
             self.trees_ = []
             if validation is not None:
@@ -1627,11 +1675,11 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
         w_sum = float(sw.sum()) + 1e-15
         self.init_score_ = float(np.dot(sw, y) / w_sum)
         F = np.full(n_samples, self.init_score_, dtype=np.float64)
-        stopper = None
+        stopper = _EarlyStopper(self.early_stopping_rounds, budget) if budget > 0.0 else None
         if validation is not None:
             X_val, y_val = validation
             F_val = np.full(X_val.shape[0], self.init_score_, dtype=np.float64)
-            stopper = _EarlyStopper(self.early_stopping_rounds)
+            stopper = _EarlyStopper(self.early_stopping_rounds, budget)
         F_best = F
 
         rng = check_random_state(self.random_state)
@@ -1666,7 +1714,10 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
             self.trees_.append(tree)
             F = F + self.learning_rate_ * tree.predict(X)
 
-            if stopper is not None:
+            if validation is None:
+                if stopper is not None and stopper.out_of_time():
+                    break
+            elif stopper is not None:
                 F_val = F_val + self.learning_rate_ * tree.predict(X_val)
                 stop = stopper.update(float(np.mean((y_val - F_val) ** 2)), stage + 1)
                 if stopper.improved:
@@ -1674,7 +1725,7 @@ class PrismBoostRegressor(RegressorMixin, BaseEstimator):
                 if stop:
                     break
 
-        if stopper is not None:
+        if stopper is not None and validation is not None:
             kept = stopper.kept_stages(len(self.trees_))
             if kept < len(self.trees_):
                 del self.trees_[kept:]
