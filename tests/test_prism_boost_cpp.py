@@ -134,3 +134,28 @@ def test_cpp_random_seed_is_platform_independent():
     # Values drawn with a 64-bit `long` on Linux/macOS; Windows must match them rather than
     # overflow its 32-bit default.
     assert [_cpp_random_seed(s) for s in (0, 1, 42)] == [2357136044, 1791095845, 1608637542]
+
+
+def _as_format_1(blob: bytes, magic: bytes, len_offset: int) -> bytes:
+    """Rewrite a format-2 core buffer as format 1 (int32 model length), as older releases wrote it."""
+    model_len = int.from_bytes(blob[len_offset : len_offset + 8], "little", signed=True)
+    return magic + blob[7:len_offset] + model_len.to_bytes(4, "little", signed=True) + blob[len_offset + 8 :]
+
+
+@pytest.mark.skipif(not CPP_AVAILABLE, reason=cpp_backend_status())
+@pytest.mark.parametrize(
+    ("estimator_cls", "magic_v1", "magic_v2", "len_offset"),
+    [(PrismBoostRegressor, b"SEFRBR1", b"SEFRBR2", 52), (PrismBoostClassifier, b"SEFRBC1", b"SEFRBC2", 56)],
+)
+def test_cpp_core_bytes_write_format_2_and_read_format_1(estimator_cls, magic_v1, magic_v2, len_offset):
+    # Format 2 stores the model length as int64: int32 overflowed for models above 2 GiB.
+    X, y = make_classification(n_samples=120, n_features=6, random_state=0)
+    model = estimator_cls(n_estimators=5, max_depth=2, random_state=0, use_cpp=True).fit(X, y)
+    blob = model._cpp_core_.to_bytes()
+    assert blob[:7] == magic_v2
+
+    core_cls = type(model._cpp_core_)
+    restored = pickle.loads(pickle.dumps(model))
+    assert_allclose(restored.predict(X), model.predict(X))
+    restored._cpp_core_ = core_cls.from_bytes(_as_format_1(blob, magic_v1, len_offset))
+    assert_allclose(restored.predict(X), model.predict(X))
