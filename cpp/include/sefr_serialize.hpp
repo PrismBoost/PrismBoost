@@ -9,8 +9,12 @@
 
 namespace sefrboost {
 
-constexpr char kClassifierMagic[] = "SEFRBC1";
-constexpr char kRegressorMagic[] = "SEFRBR1";
+// Format 2 writes the model's byte length as int64 (format 1: int32, which overflowed for
+// models above 2 GiB); format 1 buffers are still read.
+constexpr char kClassifierMagic[] = "SEFRBC2";
+constexpr char kRegressorMagic[] = "SEFRBR2";
+constexpr char kClassifierMagicV1[] = "SEFRBC1";
+constexpr char kRegressorMagicV1[] = "SEFRBR1";
 constexpr std::size_t kFormatMagicLen = 7;
 
 struct ClassifierCoreState {
