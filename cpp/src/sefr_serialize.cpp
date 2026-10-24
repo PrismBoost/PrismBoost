@@ -233,7 +233,7 @@ std::vector<uint8_t> serialize_classifier_core(const ClassifierCoreState& state)
     w.write_i32(state.n_features_in);
     w.write_i32(state.n_classes);
     const std::vector<uint8_t> model_bytes = serialize_classifier_model(state.model);
-    w.write_i32(static_cast<int32_t>(model_bytes.size()));
+    w.write_i64(static_cast<int64_t>(model_bytes.size()));
     w.write_bytes(model_bytes.data(), model_bytes.size());
     return w.take();
 }
@@ -254,10 +254,10 @@ ClassifierCoreState deserialize_classifier_core(const std::vector<uint8_t>& byte
     state.fitted = r.read_u8() != 0;
     state.n_features_in = r.read_i32();
     state.n_classes = r.read_i32();
-    const int32_t model_len = r.read_i32();
+    const int64_t model_len = r.read_i64();
     std::size_t model_offset = offset;
     state.model = deserialize_classifier_model(bytes.data(), bytes.size(), model_offset);
-    if (model_offset != offset + static_cast<std::size_t>(model_len)) {
+    if (model_len < 0 || model_offset != offset + static_cast<std::size_t>(model_len)) {
         throw std::runtime_error("SEFRBoost deserialize: classifier model length mismatch");
     }
     offset = model_offset;
@@ -278,7 +278,7 @@ std::vector<uint8_t> serialize_regressor_core(const RegressorCoreState& state) {
     w.write_u8(state.fitted ? 1 : 0);
     w.write_i32(state.n_features_in);
     const std::vector<uint8_t> model_bytes = serialize_regressor_model(state.model);
-    w.write_i32(static_cast<int32_t>(model_bytes.size()));
+    w.write_i64(static_cast<int64_t>(model_bytes.size()));
     w.write_bytes(model_bytes.data(), model_bytes.size());
     return w.take();
 }
@@ -298,10 +298,10 @@ RegressorCoreState deserialize_regressor_core(const std::vector<uint8_t>& bytes)
     state.random_state = r.read_u32();
     state.fitted = r.read_u8() != 0;
     state.n_features_in = r.read_i32();
-    const int32_t model_len = r.read_i32();
+    const int64_t model_len = r.read_i64();
     std::size_t model_offset = offset;
     state.model = deserialize_regressor_model(bytes.data(), bytes.size(), model_offset);
-    if (model_offset != offset + static_cast<std::size_t>(model_len)) {
+    if (model_len < 0 || model_offset != offset + static_cast<std::size_t>(model_len)) {
         throw std::runtime_error("SEFRBoost deserialize: regressor model length mismatch");
     }
     offset = model_offset;
