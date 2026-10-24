@@ -75,13 +75,27 @@ private:
     std::size_t& offset_;
 };
 
-void expect_magic(const std::vector<uint8_t>& bytes, const char* magic) {
+// Returns the format version (1 or 2) of the buffer's header.
+int expect_magic(const std::vector<uint8_t>& bytes, const char* magic, const char* magic_v1) {
     if (bytes.size() < kFormatMagicLen) {
         throw std::runtime_error("SEFRBoost deserialize: buffer too small");
     }
-    if (std::memcmp(bytes.data(), magic, kFormatMagicLen) != 0) {
-        throw std::runtime_error("SEFRBoost deserialize: invalid magic header");
+    if (std::memcmp(bytes.data(), magic, kFormatMagicLen) == 0) {
+        return 2;
     }
+    if (std::memcmp(bytes.data(), magic_v1, kFormatMagicLen) == 0) {
+        return 1;
+    }
+    throw std::runtime_error("SEFRBoost deserialize: invalid magic header");
+}
+
+// The model's byte length: int64 in format 2, int32 in format 1.
+std::size_t read_model_len(BufferReader& r, int version) {
+    const int64_t len = version >= 2 ? r.read_i64() : static_cast<int64_t>(r.read_i32());
+    if (len < 0) {
+        throw std::runtime_error("SEFRBoost deserialize: negative model length");
+    }
+    return static_cast<std::size_t>(len);
 }
 
 void write_tree(BufferWriter& w, const Tree& tree) {
@@ -233,13 +247,13 @@ std::vector<uint8_t> serialize_classifier_core(const ClassifierCoreState& state)
     w.write_i32(state.n_features_in);
     w.write_i32(state.n_classes);
     const std::vector<uint8_t> model_bytes = serialize_classifier_model(state.model);
-    w.write_i32(static_cast<int32_t>(model_bytes.size()));
+    w.write_i64(static_cast<int64_t>(model_bytes.size()));
     w.write_bytes(model_bytes.data(), model_bytes.size());
     return w.take();
 }
 
 ClassifierCoreState deserialize_classifier_core(const std::vector<uint8_t>& bytes) {
-    expect_magic(bytes, kClassifierMagic);
+    const int version = expect_magic(bytes, kClassifierMagic, kClassifierMagicV1);
     std::size_t offset = kFormatMagicLen;
     BufferReader r(bytes.data(), bytes.size(), offset);
     ClassifierCoreState state;
@@ -254,10 +268,10 @@ ClassifierCoreState deserialize_classifier_core(const std::vector<uint8_t>& byte
     state.fitted = r.read_u8() != 0;
     state.n_features_in = r.read_i32();
     state.n_classes = r.read_i32();
-    const int32_t model_len = r.read_i32();
+    const std::size_t model_len = read_model_len(r, version);
     std::size_t model_offset = offset;
     state.model = deserialize_classifier_model(bytes.data(), bytes.size(), model_offset);
-    if (model_offset != offset + static_cast<std::size_t>(model_len)) {
+    if (model_offset != offset + model_len) {
         throw std::runtime_error("SEFRBoost deserialize: classifier model length mismatch");
     }
     offset = model_offset;
@@ -278,13 +292,13 @@ std::vector<uint8_t> serialize_regressor_core(const RegressorCoreState& state) {
     w.write_u8(state.fitted ? 1 : 0);
     w.write_i32(state.n_features_in);
     const std::vector<uint8_t> model_bytes = serialize_regressor_model(state.model);
-    w.write_i32(static_cast<int32_t>(model_bytes.size()));
+    w.write_i64(static_cast<int64_t>(model_bytes.size()));
     w.write_bytes(model_bytes.data(), model_bytes.size());
     return w.take();
 }
 
 RegressorCoreState deserialize_regressor_core(const std::vector<uint8_t>& bytes) {
-    expect_magic(bytes, kRegressorMagic);
+    const int version = expect_magic(bytes, kRegressorMagic, kRegressorMagicV1);
     std::size_t offset = kFormatMagicLen;
     BufferReader r(bytes.data(), bytes.size(), offset);
     RegressorCoreState state;
@@ -298,10 +312,10 @@ RegressorCoreState deserialize_regressor_core(const std::vector<uint8_t>& bytes)
     state.random_state = r.read_u32();
     state.fitted = r.read_u8() != 0;
     state.n_features_in = r.read_i32();
-    const int32_t model_len = r.read_i32();
+    const std::size_t model_len = read_model_len(r, version);
     std::size_t model_offset = offset;
     state.model = deserialize_regressor_model(bytes.data(), bytes.size(), model_offset);
-    if (model_offset != offset + static_cast<std::size_t>(model_len)) {
+    if (model_offset != offset + model_len) {
         throw std::runtime_error("SEFRBoost deserialize: regressor model length mismatch");
     }
     offset = model_offset;
