@@ -2,6 +2,18 @@
 
 Notable changes per release. Dates are release dates on PyPI.
 
+## 0.5.1 (2026-10-24)
+
+### Fixed
+
+- Models whose serialized size is above 2 GiB can now be pickled and loaded. The model's byte
+  length was stored as an int32 and overflowed, so loading failed with "model length mismatch".
+  This shows up with wide data, since every oblique split keeps one coefficient per feature: it
+  was hit at 11,567 features (a 3.58 GiB model) in RamanBench and at 1,738 features in TabArena.
+  The core buffers now use format 2 (`SEFRBC2` / `SEFRBR2`), which stores the length as int64.
+  Format-1 buffers written by earlier releases still load; older releases cannot read format 2.
+  Reported and fixed by @mario-koddenbrock (#4).
+
 ## 0.5.0 (2026-10-06)
 
 ### Added
